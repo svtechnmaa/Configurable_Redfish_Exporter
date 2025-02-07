@@ -2,14 +2,14 @@ name: CI
 on:
   push:
     branches:
-      - main
+      - test
   pull_request:
     branches:
       - main
 
 jobs:
   build_images:
-    runs-on: self-hosted
+    runs-on: ubuntu-dind
     permissions:
       contents: read
       packages: write
@@ -25,14 +25,20 @@ jobs:
         username: '${{ github.actor }}'
         password: '${{ secrets.GITHUB_TOKEN }}'
     - name: Build and Push specific version
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v3
       with:
         context: .
-        push: true
-        tags: |
-          ghcr.io/${{ github.repository_owner }}/redfish-exporter:2.x.x
-          ghcr.io/${{ github.repository_owner }}/redfish-exporter:2.0.5
-          ghcr.io/${{ github.repository_owner }}/redfish-exporter:latest
-        build-args: |
-          appVersion=2.0.5
-          maintainer=Freezing
+        load: true
+        tags: ghcr.io/${{ github.repository_owner }}:v1.${{ github.run_number }}
+    # - name: Build and Push specific version
+    #   uses: docker/build-push-action@v6
+    #   with:
+    #     context: .
+    #     push: true
+    #     tags: |
+    #       ghcr.io/${{ github.repository_owner }}/redfish-exporter:2.x.x
+    #       ghcr.io/${{ github.repository_owner }}/redfish-exporter:2.0.5
+    #       ghcr.io/${{ github.repository_owner }}/redfish-exporter:latest
+    #     build-args: |
+    #       appVersion=2.0.5
+    #       maintainer=Freezing
