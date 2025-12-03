@@ -160,6 +160,7 @@ Metrics:
       GOODINUSE: 0
       UNKNOWN: 99
       ABSENT: 2
+      UNAVAILABLEOFFLINE: 2
   - Name: PhysicalServer_LastPowerOutputWatts
     Description: 'physical server power supplie status'
     Type: Gauge

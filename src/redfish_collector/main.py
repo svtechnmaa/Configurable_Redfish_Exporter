@@ -1,65 +1,41 @@
 from fastapi import FastAPI
 from .routers import prometheus
-from .core.generator import generatorMultiThreading as generator
-from multiprocessing import Process
+import sys
 import uvicorn
-# import logging
 import argparse
-from os import path, getpid
+from os import path
 
 REDFISH_DATA = '/tmp/redfish-data/'
 
 app = FastAPI(title="Redfish Collector", description="Redfish DMTF Collector using for physical server monitoring")
 app.include_router(prometheus.router)
-# app.include_router(generator.router)
-
-def uvicornExec(host, port, config_path):
-    uvicorn.run("redfish_collector.main:app", host=host, port=port, log_config=config_path)
 
 def main():
     parser = argparse.ArgumentParser(description='Physical Server state Exporter for Prometheus')
 
     parser.add_argument('--host', type=str, dest='host', default='0.0.0.0', help='address to serve on')
     parser.add_argument('--port', type=int, dest='port', default=9814, help='port to bind')
-    ### Temporary disable
-    # parser.add_argument('--templatedir', type=str, dest='templatedir', help='Directory Configs')
-    # parser.add_argument('--datadir', type=str, dest='datadir', help='Directory Data Old and New saved')
+    parser.add_argument('--rotate', type=int, dest='rotate', default=300, help='log rotate interval in seconds')
+    parser.add_argument('--workers', type=int, dest='workers', default=4, help='Number of worker processes to run Uvicorn')
 
     args = parser.parse_args()
     config_path = path.join(path.dirname(__file__), 'logging/logging.yml')
-
-    if args.host:
-        host = args.host
-    if args.port:
-        port = args.port
-
-    ### Temporary disable
-    # if args.templatedir:
-    #     template_dir = args.templatedir
-    # if args.datadir:
-    #     data_dir = args.datadir
-
     try:
-        # logging.info("Main process PID: %s" % getpid())
-        collectorProcess = Process(target=generator)
-        collectorProcess.start()
-        # logging.info("Started Collector with PID: %s, Parent PID: %s" %(collectorProcess.pid,getpid()))
-        uvicornProcess = Process(target=uvicornExec, args=(host, port, config_path))
-        uvicornProcess.start()
-        # logging.info("Started Uvicorn with PID: %s, Parent PID: %s" %(uvicornProcess.pid,getpid()))
-        uvicornProcess.join()
-    except Exception as err:
-        # logging.error("Error: %s" %err)
-        collectorProcess.terminate()
-        collectorProcess.join()
-        # logging.info("Terminated background process")
-        return
+        uvicorn.run(
+            "redfish_collector.main:app", 
+            host=args.host, 
+            port=args.port, 
+            log_config=config_path,
+            workers=args.workers,
+            reload=False 
+        )
+        
     except KeyboardInterrupt:
-        # logging.info("shutting down")
-        collectorProcess.terminate()
-        collectorProcess.join()
-        # logging.info("Terminated background process")
-        return
+        print("\nRedfish Exporter stopped.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"An unexpected error occurred during run execution: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

@@ -10,6 +10,7 @@ from jsonpath_ng.ext import parse
 import asyncio
 from aiohttp import ClientConnectorError, ClientResponseError, BasicAuth, ClientTimeout, ClientSession
 
+
 def readYAMLTemplate(templateFile):
     config_file_path = path.join(path.dirname(__file__), templateFile)
     if path.isfile(config_file_path):
@@ -49,46 +50,48 @@ def dataJSONWriter(dataRaw,fileDir,fileName, serverAddress):
     try:
         with open('%s%s' % (fileDir,fileName), 'w') as file:
             json.dump(dataRaw, file)
-        logging.info("[%s] Write data successfully at %s%s" % (serverAddress,fileDir,fileName))
+        logging.debug("[%s] Write data successfully at %s%s" % (serverAddress,fileDir,fileName))
     except Exception as e:
         logging.error("[%s] There dataJSONWriter error with %s" % (serverAddress,e))
         json.dump([],file)
     return
-
-async def fetch(url,username,password, session,serverAddress):
-    auth = BasicAuth(username,password)
-    retries=5
-    backoffFactor=0.5
-    for attempt in range(1,retries+1):
+async def fetch(url, token, session, serverAddress):
+    headers = {'X-Auth-Token': token}
+    
+    retries = 3
+    backoffFactor = 0.5
+    
+    for attempt in range(1, retries + 1):
         try:
-            async with session.get(url,auth=auth, ssl=False) as response:
+            async with session.get(url, headers=headers, ssl=False) as response:
+                response.raise_for_status() 
                 return await response.json()
         except (ClientConnectorError, ClientResponseError) as e:
-            logging.warning("[%s] Attempt %s with url: %s failed: %s" % (serverAddress,attempt,url,e))
+            logging.warning("[%s] Attempt %s with url: %s failed: %s", serverAddress, attempt, url, e)
+            
             if attempt == retries:
-                logging.error("[%s] Max retries reached. Giving up." % serverAddress)
+                logging.error("[%s] Max retries reached. Giving up.", serverAddress)
                 raise
             else:
                 delay = backoffFactor * (2 ** (attempt - 1))
-                logging.warning("[%s] Retrying in %s seconds..." % (serverAddress,delay))
-                await asyncio.sleep(delay)        
+                logging.warning("[%s] Retrying in %.2f seconds...", serverAddress, delay)
+                await asyncio.sleep(delay)
+        except Exception as e:
+            logging.error("[%s] Unexpected error during fetch: %s", serverAddress, e)
+            raise
 
-async def fetch_all(urls: list(),username,password,serverAddress):
+async def fetch_all(urls: list, token, serverAddress):
     timeout = ClientTimeout(total=180)
-    # dataRaw = dict()
-    try: 
+    try:
         async with ClientSession(timeout=timeout) as session:
-            # if len(urls) == 1:
-            #     results = await fetch(urls[0],username,password, session)
-            # else:
-            tasks = [fetch(url,username,password, session,serverAddress) for url in urls]
+            tasks = [fetch(url, token, session, serverAddress) for url in urls]
             results = await asyncio.gather(*tasks)
             return results
     except Exception as e:
-        logging.error("[%s] There fetch_all error with %s" % (serverAddress,e))
+        logging.error("[%s] fetch_all error: %s", serverAddress, e)
         raise
 
-async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,username,password,logLevel):
+async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLevel):
     logFormat = '%(asctime)s [%(levelname)s] %(message)s'
     logging.basicConfig(format=logFormat, level=logLevel.upper())
     logging.debug("[%s] Key schemaContent: %s" % (serverAddress,schemaContent))
@@ -114,16 +117,17 @@ async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,username,pa
         logging.debug("[%s] Father URL: %s" % (serverAddress,url))
         # dataRaw = dict()
         if '$jsonpath' in schemaContent:
-            tempRaw = (await fetch_all([url],username,password,serverAddress))[0]
+            tempRaw = (await fetch_all([url],token,serverAddress))[0]
             # dataRaw =dataRaw[0]
             childURIList = jsonpathCollector(tempRaw,str(schemaContent['$jsonpath']))
             # logging.info(childURIList)
             if childURIList is False:
-                logging.warning("[%s] Child URI List isn't existed" % serverAddress)
-                logging.error("[%s] childURIList:\n%s" % (serverAddress,tempRaw))
+                logging.warning("[%s] Child URI List isn't existed with %s" % (serverAddress, schemaContent))
+                logging.debug("[%s] childURIList:\n%s" % (serverAddress,tempRaw))
                 return
-            childURLList = ["https://%s%s" % (serverAddress,path) for path in childURIList]
-            dataRawList = await fetch_all(childURLList,username,password,serverAddress)
+            else:
+                childURLList = ["https://%s%s" % (serverAddress,path) for path in childURIList]
+            dataRawList = await fetch_all(childURLList,token,serverAddress)
             if dataRawList is None:
                 logging.error("[%s] Get data failed" % serverAddress)
                 return dataRawList
@@ -137,14 +141,14 @@ async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,username,pa
                         logging.debug("[%s] Updated key: %s" % (serverAddress,updatedKeyDict))
                         # keyDict.update(getKeyDictFromURLPath(childURL, schemaContent))
                         try:
-                            dataRawList[count][key] = await rawDataCollector(serverAddress,schemaContent[key],updatedKeyDict,username,password,logLevel)
+                            dataRawList[count][key] = await rawDataCollector(serverAddress,schemaContent[key],updatedKeyDict,token,logLevel)
                             count+=1
                         except Exception as e:
                             logging.error("[%s] There error with %s" % (serverAddress,e))
             for childURL,dataRaw in zip(childURLList,dataRawList):
                 keyDict.update(getKeyDictFromURLPath(childURL, schemaContent))
         else:
-            dataRawList = await fetch_all([url],username,password,serverAddress)
+            dataRawList = await fetch_all([url],token,serverAddress)
             keyDict.update(getKeyDictFromURLPath(url, schemaContent))
             return dataRawList
         return dataRawList
@@ -154,8 +158,8 @@ async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,username,pa
 
 async def dataCollector(serverAddress,username,password,templateDir,logLevel):
     # logging.getLogger().handlers[0].flush()
-    # logFormat = '%(asctime)s [%(levelname)s] %(message)s'  
-    # logging.basicConfig(format=logFormat, level=logLevel.upper())
+    logFormat = '%(asctime)s [%(levelname)s] %(message)s'  
+    logging.basicConfig(format=logFormat, level=logLevel.upper())
 
     ### Read schema from schemas/Common.yml file
     # endpointURL = "https://%s" % serverAddress
@@ -171,8 +175,33 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
     logging.debug("[%s] Type of commonSchema %s" % (serverAddress,type(commonSchema)))
 
     for basePoint in commonSchema['Metadata']:
-        # vendorData = await fetch_all(childURIList,username,password)
-        vendorData = (await rawDataCollector(serverAddress,commonSchema['Metadata'][basePoint],keyIDDict,username,password,logLevel))[0]
+        if "$tokenuri" in commonSchema['Metadata'][basePoint]:
+            tokenURL = "https://%s%s" % (serverAddress,commonSchema['Metadata'][basePoint]['$tokenuri'])
+            timeout = ClientTimeout(total=60)
+            payload = {"UserName": username,"Password": password}
+            logging.info("[%s] token URL %s and Payload: %s" % (serverAddress,tokenURL,payload))
+            try:
+                async with ClientSession(timeout=timeout) as session:
+                    async with session.post(tokenURL,json=payload, ssl=False) as response:
+                        tokenData = response.headers
+                        logging.debug("[%s] Token Data: %s" % (serverAddress,tokenData))
+                        if 'X-Auth-Token' in tokenData:
+                            tokenValue = tokenData['X-Auth-Token']
+                            if tokenData['Location'].startswith('https://'):
+                                logoutURL = tokenData['Location']
+                            else:
+                                logoutURL = "https://%s%s" % (serverAddress,tokenData['Location'])
+                            logging.info("[%s] Get Token Value successfully" % serverAddress)
+                            pass
+                        else:
+                            logging.error("[%s] Can't get X-Auth-Token from response headers" % serverAddress)
+                            return
+                    pass
+            except Exception as e:
+                logging.error("[%s] There is error when getting token: %s" % (serverAddress,e))
+                return
+        # vendorData = await fetch_all(childURIList,token)
+        vendorData = (await rawDataCollector(serverAddress,commonSchema['Metadata'][basePoint],keyIDDict,tokenValue,logLevel))[0]
 
     if 'Manufacturer' in vendorData:
         manufacturer = vendorData['Manufacturer']
@@ -222,9 +251,23 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
     if schema is None:
         logging.error("[%s] Can't generate vendor schema, please check again" % serverAddress)
         return
-    data = [rawDataCollector(serverAddress,schema['Metadata'][component],keyIDDict,username,password,logLevel) for component in schema['Metadata']]
+    data = [rawDataCollector(serverAddress,schema['Metadata'][component],keyIDDict,tokenValue,logLevel) for component in schema['Metadata']]
     results = await asyncio.gather(*data)
     dataRaw = dict()
+    try:
+        timeout = ClientTimeout(total=60)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.delete(logoutURL, headers={'X-Auth-Token': tokenValue}, ssl=False) as response:
+                if response.status == 200 or response.status == 204:
+                    logging.info("[%s] Logged out successfully" % serverAddress)
+                    pass
+                else:
+                    logging.error("[%s] Logout failed with status code: %s" % (serverAddress,response.status))
+            pass
+    except Exception as e:
+        logging.error("[%s] There is error when logout: %s" % (serverAddress,e))
+        return
+    
     for component, result in zip(schema['Metadata'], results):
         dataRaw[component] = result
     logging.debug("[%s] DataRaw: %s" % (serverAddress,dataRaw))

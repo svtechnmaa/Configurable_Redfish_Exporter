@@ -2,6 +2,7 @@ Metadata:
   RedfishV1:
     "$inituri": /redfish/v1/Systems
     "$jsonpath": $.Members[*].*
+    "$tokenuri": /redfish/v1/SessionService/Sessions
     # ">>driveid": -1
     ">>serverid": -1 ### key that you can collect from URI
 #  RedfishV2:
