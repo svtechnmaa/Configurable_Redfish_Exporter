@@ -73,22 +73,22 @@ async def fetch(url, token, session, serverAddress, semaphore: asyncio.Semaphore
                 
                 if attempt == retries:
                     logging.error("[%s] Max retries reached. Giving up.", serverAddress)
-                    # raise
-                    return {"status": e.status,"data": None,"success": False,"error_message": f"Request Error: Status {e.status} for URL {url}"}
+                    statusCode = getattr(e, 'status', None) or getattr(e, 'code', 500)
+                    return {"status": statusCode, "data": None, "success": False, "error_message": f"Request Error: {e} for URL {url}"}
                 else:
                     delay = backoffFactor * (2 ** (attempt - 1))
                     logging.debug("[%s] Retrying in %.2f seconds...", serverAddress, delay)
                     await asyncio.sleep(delay)
             except Exception as e:
                 logging.error("[%s] Unexpected error during fetch: %s", serverAddress, e)
-                return {"status": e.status,"data": None,"success": False,"error_message": f"Request Error: Status {e.status} for URL {url}"}
-                # raise
+                return {"status": 500, "data": None, "success": False, "error_message": f"Unexpected error: {e} for URL {url}"}
 
 async def fetch_all(urls: list, token, serverAddress):
     timeout = ClientTimeout(total=180)
+    semaphore = asyncio.Semaphore(8)
     try:
         async with ClientSession(timeout=timeout) as session:
-            tasks = [fetch(url, token, session, serverAddress,asyncio.Semaphore(8)) for url in urls]
+            tasks = [fetch(url, token, session, serverAddress,semaphore) for url in urls]
             results = await asyncio.gather(*tasks)
             return results
     except Exception as e:
