@@ -4,7 +4,7 @@ from pydantic import IPvAnyAddress
 from starlette import status
 from ..core.dataReconstruction import dataReconstructor
 from ..core.rawCollector import dataCollector,jsonpathCollector,readYAMLTemplate
-from os import path
+from os import path,makedirs
 import re
 import json
 import logging
@@ -14,14 +14,7 @@ from prometheus_client import generate_latest, Gauge, CollectorRegistry
 
 REDFISH_DATA = '/tmp/redfish-data/'
 
-# settings = Settings()
 templateDir = config_path = path.join(path.dirname(__file__), '../core/templates/')
-
-# REGISTRY.unregister(PROCESS_COLLECTOR)
-# REGISTRY.unregister(PLATFORM_COLLECTOR)
-# REGISTRY.unregister(REGISTRY._names_to_collectors['python_gc_objects_collected_total'])
-# registry = REGISTRY
-# REQUEST_TIME = Summary('request_processing_seconds', 'Time spent processing request')
 CACHE={}
 
 router = APIRouter(
@@ -36,9 +29,12 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail = 'Collect metrics Failed, please add params')
     else: 
         registry = CollectorRegistry()
-        componentMetrics['PhysicalServer_Query'] = Gauge('PhysicalServer_Query','physical server query status',['serverAddress'],registry=registry)
+        componentMetrics['PhysicalServer_Query'] = Gauge('PhysicalServer_Query','physical server query status',['ServerAddress'],registry=registry)
         timeCalled = time.ctime()
         serverAddress = str(serverAddress)
+        if not path.exists(REDFISH_DATA):
+            logging.info(f"Directory {REDFISH_DATA} does not exist. Creating it.")
+            makedirs(REDFISH_DATA)
         try:
             metricsConfigFile = f'{templateDir}configs/{config}.yml'
             metricsConfig = readYAMLTemplate(metricsConfigFile)
@@ -94,7 +90,6 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
             collectedData = json.load(file)
 
         hostName = collectedData['Common'][0]['HostName']
-        # componentMetrics={}
         for metric in metricsConfig['Metrics']:
             standard = ['Name', 'Description', 'Label', 'Datapoint', 'Result', 'Type']
             errorFlag = 0
@@ -176,7 +171,6 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
 
         componentMetrics['PhysicalServer_Query'].labels(str(serverAddress)).set(1)
         metrics = generate_latest(registry)
-        # REQUEST_TIME.observe(time.time() - start_time)
         CACHE[cacheInfo] = (metrics, time.time())
         return PlainTextResponse(metrics)
 
@@ -184,7 +178,6 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
         if 'PhysicalServer_Query' in componentMetrics:
             componentMetrics['PhysicalServer_Query'].labels(str(serverAddress)).set(0)
             metrics = generate_latest(registry)
-            # REQUEST_TIME.observe(time.time() - start_time)
             logging.error(f"[{serverAddress}] Metric collection failed: {err}", exc_info=True)
             rawPath = f'{REDFISH_DATA}RawData/{serverAddress}.json'
             newPath = f'{REDFISH_DATA}NewData/{serverAddress}.json'

@@ -8,7 +8,8 @@ from jinja2 import Template
 from jsonpath_ng.ext import parse 
 # import aiohttp
 import asyncio
-from aiohttp import ClientConnectorError, ClientResponseError, BasicAuth, ClientTimeout, ClientSession
+from asyncio.exceptions import TimeoutError
+from aiohttp import ClientConnectorError, ClientResponseError, ClientTimeout, ClientSession
 
 
 def readYAMLTemplate(templateFile):
@@ -55,40 +56,43 @@ def dataJSONWriter(dataRaw,fileDir,fileName, serverAddress):
         logging.error("[%s] There dataJSONWriter error with %s" % (serverAddress,e))
         json.dump([],file)
     return
-async def fetch(url, token, session, serverAddress):
+async def fetch(url, token, session, serverAddress, semaphore: asyncio.Semaphore):
     headers = {'X-Auth-Token': token}
     
-    retries = 3
+    retries = 5
     backoffFactor = 0.5
     
-    for attempt in range(1, retries + 1):
-        try:
-            async with session.get(url, headers=headers, ssl=False) as response:
-                response.raise_for_status() 
-                return await response.json()
-        except (ClientConnectorError, ClientResponseError) as e:
-            logging.warning("[%s] Attempt %s with url: %s failed: %s", serverAddress, attempt, url, e)
-            
-            if attempt == retries:
-                logging.error("[%s] Max retries reached. Giving up.", serverAddress)
-                raise
-            else:
-                delay = backoffFactor * (2 ** (attempt - 1))
-                logging.warning("[%s] Retrying in %.2f seconds...", serverAddress, delay)
-                await asyncio.sleep(delay)
-        except Exception as e:
-            logging.error("[%s] Unexpected error during fetch: %s", serverAddress, e)
-            raise
+    async with semaphore:
+        for attempt in range(1, retries + 1):
+            try:
+                async with session.get(url, headers=headers, ssl=False) as response:
+                    response.raise_for_status() 
+                    return await response.json()
+            except (ClientConnectorError, ClientResponseError, TimeoutError, OSError) as e:
+                logging.debug("[%s] Attempt %s with url: %s failed: %s", serverAddress, attempt, url, e)
+                
+                if attempt == retries:
+                    logging.error("[%s] Max retries reached. Giving up.", serverAddress)
+                    # raise
+                    return {"status": e.status,"data": None,"success": False,"error_message": f"Request Error: Status {e.status} for URL {url}"}
+                else:
+                    delay = backoffFactor * (2 ** (attempt - 1))
+                    logging.debug("[%s] Retrying in %.2f seconds...", serverAddress, delay)
+                    await asyncio.sleep(delay)
+            except Exception as e:
+                logging.error("[%s] Unexpected error during fetch: %s", serverAddress, e)
+                return {"status": e.status,"data": None,"success": False,"error_message": f"Request Error: Status {e.status} for URL {url}"}
+                # raise
 
 async def fetch_all(urls: list, token, serverAddress):
     timeout = ClientTimeout(total=180)
     try:
         async with ClientSession(timeout=timeout) as session:
-            tasks = [fetch(url, token, session, serverAddress) for url in urls]
+            tasks = [fetch(url, token, session, serverAddress,asyncio.Semaphore(8)) for url in urls]
             results = await asyncio.gather(*tasks)
             return results
     except Exception as e:
-        logging.error("[%s] fetch_all error: %s", serverAddress, e)
+        logging.error("[%s] Fetch all URL error: %s", serverAddress, e)
         raise
 
 async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLevel):
@@ -135,7 +139,7 @@ async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLe
                 if isinstance(schemaContent[key],dict):
                     logging.debug("[%s] Found child component: %s" % (serverAddress,key))
                     count = 0
-                    for childURL,dataRaw in zip(childURLList,dataRawList):
+                    for childURL, _ in zip(childURLList,dataRawList):
                         childKey = getKeyDictFromURLPath(childURL, schemaContent)
                         updatedKeyDict = keyDict | childKey
                         logging.debug("[%s] Updated key: %s" % (serverAddress,updatedKeyDict))
@@ -145,7 +149,7 @@ async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLe
                             count+=1
                         except Exception as e:
                             logging.error("[%s] There error with %s" % (serverAddress,e))
-            for childURL,dataRaw in zip(childURLList,dataRawList):
+            for childURL, _ in zip(childURLList,dataRawList):
                 keyDict.update(getKeyDictFromURLPath(childURL, schemaContent))
         else:
             dataRawList = await fetch_all([url],token,serverAddress)
@@ -179,7 +183,7 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
             tokenURL = "https://%s%s" % (serverAddress,commonSchema['Metadata'][basePoint]['$tokenuri'])
             timeout = ClientTimeout(total=60)
             payload = {"UserName": username,"Password": password}
-            logging.info("[%s] token URL %s and Payload: %s" % (serverAddress,tokenURL,payload))
+            logging.debug("[%s] token URL %s and Payload: %s" % (serverAddress,tokenURL,payload))
             try:
                 async with ClientSession(timeout=timeout) as session:
                     async with session.post(tokenURL,json=payload, ssl=False) as response:
