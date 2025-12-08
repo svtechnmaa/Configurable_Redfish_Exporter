@@ -78,9 +78,8 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
                 with open(inventoryFile, 'w') as f:
                     yaml.dump([block], f, default_flow_style=False)
         except Exception as err:
-            logging.error("Generate instance failed: %s" %err)
-            return False
-
+            logging.exception("Generate instance failed: %s" % err)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Configuration error: {err}")
     try:
         dataRaw, dataNewSchema, modelSchemaDir = await dataCollector(serverAddress,username,password,templateDir,loglevel)
         dataReconstructor(dataRaw, dataNewSchema, modelSchemaDir, serverAddress,loglevel)
