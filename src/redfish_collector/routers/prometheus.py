@@ -9,7 +9,6 @@ import re
 import json
 import logging
 import time
-import yaml
 from prometheus_client import generate_latest, Gauge, CollectorRegistry
 
 REDFISH_DATA = '/tmp/redfish-data/'
@@ -30,7 +29,7 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
     else: 
         registry = CollectorRegistry()
         componentMetrics['PhysicalServer_Query'] = Gauge('PhysicalServer_Query','physical server query status',['ServerAddress'],registry=registry)
-        timeCalled = time.ctime()
+        # timeCalled = time.ctime()
         serverAddress = str(serverAddress)
         if not path.exists(REDFISH_DATA):
             logging.info(f"Directory {REDFISH_DATA} does not exist. Creating it.")
@@ -40,7 +39,10 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
             metricsConfig = readYAMLTemplate(metricsConfigFile)
             if "Auth" not in metricsConfig:
                 logging.error(f"[{serverAddress}] Can't find Auth in config file {config}")
-                raise ValueError("Auth details missing in configuration file.")
+                componentMetrics['PhysicalServer_Query'].labels(str(serverAddress)).set(0)
+                metrics = generate_latest(registry)
+                logging.error(f"[{serverAddress}] Auth details missing in configuration file", exc_info=True)
+                return PlainTextResponse(metrics)
             username = metricsConfig['Auth']['Username']
             password = metricsConfig['Auth']['Password']
 
@@ -51,35 +53,11 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
                     logging.info(f"[{serverAddress}] Serving health-check from cache.")
                     return PlainTextResponse(cachedResponse)
                 
-            inventoryFile = f'{REDFISH_DATA}inventory.yml'
-            block = {'serverAddress': str(serverAddress), 'username': str(username), 'password': str(password) ,'timeCalled': timeCalled}
-            if path.isfile(inventoryFile):
-                with open(inventoryFile, 'r') as f:
-                    inventory = yaml.safe_load(f) or []
-                if inventory == []:
-                    with open(inventoryFile, 'w') as f:
-                        yaml.dump([block], f, default_flow_style=False)
-                else:
-                    existedServer = False
-                    for server in inventory:
-                        if server['serverAddress'] == str(serverAddress):
-                            server['username'] = str(username)
-                            server['password'] = str(password)
-                            server['timeCalled'] = timeCalled
-                            with open(inventoryFile, 'w') as f:
-                                yaml.dump(inventory, f, default_flow_style=False)
-                            existedServer = True
-                            break
-                    if existedServer is False:
-                        inventory.append(block)
-                        with open(inventoryFile, 'w') as f:
-                            yaml.dump(inventory, f, default_flow_style=False)
-            else:
-                with open(inventoryFile, 'w') as f:
-                    yaml.dump([block], f, default_flow_style=False)
         except Exception as err:
-            logging.exception("Generate instance failed: %s" % err)
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Configuration error: {err}")
+            componentMetrics['PhysicalServer_Query'].labels(str(serverAddress)).set(0)
+            metrics = generate_latest(registry)
+            logging.error(f"[{serverAddress}] Metric collection failed: {err}", exc_info=True)
+            return PlainTextResponse(metrics)
     try:
         dataRaw, dataNewSchema, modelSchemaDir = await dataCollector(serverAddress,username,password,templateDir,loglevel)
         dataReconstructor(dataRaw, dataNewSchema, modelSchemaDir, serverAddress,loglevel)
@@ -107,7 +85,6 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
                     if not isinstance(collectedData.get(elements[0]), list):
                         logging.warning(f"[{serverAddress}] Data point root is not a list: {elements[0]}")
                         continue
-                    # logging.error("Fist Point: %s" % firstPointData)
                     idList = jsonpathCollector(collectedData,str("$..Id"),output='fullpath&value')
                     for memberID in idList:
                         if elements[-1] in memberID and elements[0] in memberID:
@@ -174,17 +151,17 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
         return PlainTextResponse(metrics)
 
     except Exception as err:
+        componentMetrics['PhysicalServer_Query'].labels(str(serverAddress)).set(0)
+        metrics = generate_latest(registry)
         if 'PhysicalServer_Query' in componentMetrics:
-            componentMetrics['PhysicalServer_Query'].labels(str(serverAddress)).set(0)
-            metrics = generate_latest(registry)
             logging.error(f"[{serverAddress}] Metric collection failed: {err}", exc_info=True)
             rawPath = f'{REDFISH_DATA}RawData/{serverAddress}.json'
             newPath = f'{REDFISH_DATA}NewData/{serverAddress}.json'
             try:
                 with open(rawPath, 'w'): pass
                 with open(newPath, 'w'): pass
-                return PlainTextResponse(metrics)
             except IOError as e:
                 logging.error(f"[{serverAddress}] Failed to truncate files: {e}")
         else:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'Collect metrics Failed: {err}')
+            logging.error(f"[{serverAddress}] This's new bug ha ha: {err}", exc_info=True)
+        return PlainTextResponse(metrics)

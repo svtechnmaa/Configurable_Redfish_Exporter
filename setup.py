@@ -1,12 +1,12 @@
 from setuptools import setup, find_packages, find_namespace_packages
 
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 PACKAGE_NAME = "redfish-exporter"
 
 setup(
     name=PACKAGE_NAME,
-    description="The nextgen Exporter for Physical Server Components Monitoring via RedFish API using FastAPI",
-    version="2.2.0",
+    description="The Exporter for Physical Server Components Monitoring via RedFish API using FastAPI",
+    version="2.2.1",
     author="Freezing",
     url="https://github.com/svtechnmaa/Configurable_Redfish_Exporter.git",
     package_dir = {"": "src"},
