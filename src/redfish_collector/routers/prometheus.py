@@ -153,15 +153,12 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
     except Exception as err:
         componentMetrics['PhysicalServer_Query'].labels(str(serverAddress)).set(0)
         metrics = generate_latest(registry)
-        if 'PhysicalServer_Query' in componentMetrics:
-            logging.error(f"[{serverAddress}] Metric collection failed: {err}", exc_info=True)
-            rawPath = f'{REDFISH_DATA}RawData/{serverAddress}.json'
-            newPath = f'{REDFISH_DATA}NewData/{serverAddress}.json'
-            try:
-                with open(rawPath, 'w'): pass
-                with open(newPath, 'w'): pass
-            except IOError as e:
-                logging.error(f"[{serverAddress}] Failed to truncate files: {e}")
-        else:
-            logging.error(f"[{serverAddress}] This's new bug ha ha: {err}", exc_info=True)
+        logging.error(f"[{serverAddress}] Metric collection failed: {err}", exc_info=True)
+        rawPath = f'{REDFISH_DATA}RawData/{serverAddress}.json'
+        newPath = f'{REDFISH_DATA}NewData/{serverAddress}.json'
+        try:
+            open(rawPath, 'w').close()
+            open(newPath, 'w').close()
+        except IOError as e:
+            logging.error(f"[{serverAddress}] Failed to truncate files: {e}")
         return PlainTextResponse(metrics)
