@@ -63,26 +63,26 @@ async def fetch(url, token, session, serverAddress, semaphore: asyncio.Semaphore
     retries = 5
     backoffFactor = 0.5
     
-    async with semaphore:
-        for attempt in range(1, retries + 1):
-            try:
+    for attempt in range(1, retries + 1):
+        try:
+            async with semaphore:
                 async with session.get(url, headers=headers, ssl=False) as response:
                     response.raise_for_status() 
                     return await response.json()
-            except (ClientConnectorError, ClientResponseError, TimeoutError, OSError) as e:
-                logging.debug("[%s] Attempt %s with url: %s failed: %s", serverAddress, attempt, url, e)
-                
-                if attempt == retries:
-                    logging.error("[%s] Max retries reached. Giving up.", serverAddress)
-                    statusCode = getattr(e, 'status', None) or getattr(e, 'code', 500)
-                    return {"status": statusCode, "data": None, "success": False, "error_message": f"Request Error: {e} for URL {url}"}
-                else:
-                    delay = backoffFactor * (2 ** (attempt - 1))
-                    logging.debug("[%s] Retrying in %.2f seconds...", serverAddress, delay)
-                    await asyncio.sleep(delay)
-            except Exception as e:
-                logging.error("[%s] Unexpected error during fetch: %s", serverAddress, e)
-                return {"status": 500, "data": None, "success": False, "error_message": f"Unexpected error: {e} for URL {url}"}
+        except (ClientConnectorError, ClientResponseError, TimeoutError, OSError) as e:
+            logging.debug("[%s] Attempt %s with url: %s failed: %s", serverAddress, attempt, url, e)
+            
+            if attempt == retries:
+                logging.error("[%s] Max retries reached. Giving up.", serverAddress)
+                statusCode = getattr(e, 'status', None) or getattr(e, 'code', 500)
+                return {"status": statusCode, "data": None, "success": False, "error_message": f"Request Error: {e} for URL {url}"}
+            else:
+                delay = backoffFactor * (2 ** (attempt - 1))
+                logging.debug("[%s] Retrying in %.2f seconds...", serverAddress, delay)
+                await asyncio.sleep(delay)
+        except Exception as e:
+            logging.error("[%s] Unexpected error during fetch: %s", serverAddress, e)
+            return {"status": 500, "data": None, "success": False, "error_message": f"Unexpected error: {e} for URL {url}"}
 
 async def fetch_all(urls: list, token, serverAddress):
     timeout = ClientTimeout(total=180)
@@ -199,21 +199,19 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
                                 else:
                                     logoutURL = "https://%s%s" % (serverAddress,tokenData['Location'])
                                 logging.info("[%s] Get Token Value successfully" % serverAddress)
-                                pass
+                                break
                             else:
                                 logging.error("[%s] Can't get X-Auth-Token from response headers" % serverAddress)
-                        pass
-                    break
-                except Exception as e:
+                except (ClientConnectorError, ClientResponseError, TimeoutError) as e:
                     logging.error("[%s] There is error when getting token: %s" % (serverAddress,e))
 
                 if attempt < 3:
                     logging.debug("[%s] Retrying to get token (Attempt %d)" % (serverAddress, attempt + 1))
-                    await asyncio.sleep(1 * (2 ** (attempt - 1)))
+                    await asyncio.sleep(2 ** (attempt - 1))
                 else:
                     logging.error("[%s] Failed to get token after 3 attempts" % serverAddress)
                     return
-        # vendorData = await fetch_all(childURIList,token)
+                
         vendorData = (await rawDataCollector(serverAddress,commonSchema['Metadata'][basePoint],keyIDDict,tokenValue,logLevel))[0]
 
     if 'Manufacturer' in vendorData:
