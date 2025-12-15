@@ -12,6 +12,7 @@ from asyncio.exceptions import TimeoutError
 from aiohttp import ClientConnectorError, ClientResponseError, ClientTimeout, ClientSession
 
 
+
 def readYAMLTemplate(templateFile):
     config_file_path = path.join(path.dirname(__file__), templateFile)
     if path.isfile(config_file_path):
