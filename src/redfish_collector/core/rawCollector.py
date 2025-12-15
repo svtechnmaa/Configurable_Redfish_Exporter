@@ -185,26 +185,34 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
             timeout = ClientTimeout(total=60)
             payload = {"UserName": username,"Password": password}
             logging.debug("[%s] token URL %s and Payload: %s" % (serverAddress,tokenURL,payload))
-            try:
-                async with ClientSession(timeout=timeout) as session:
-                    async with session.post(tokenURL,json=payload, ssl=False) as response:
-                        tokenData = response.headers
-                        logging.debug("[%s] Token Data: %s" % (serverAddress,tokenData))
-                        if 'X-Auth-Token' in tokenData:
-                            tokenValue = tokenData['X-Auth-Token']
-                            if tokenData['Location'].startswith('https://'):
-                                logoutURL = tokenData['Location']
+            for attempt in range(1, 4):
+                try:
+                    async with ClientSession(timeout=timeout) as session:
+                        async with session.post(tokenURL,json=payload, ssl=False) as response:
+                            response.raise_for_status()
+                            tokenData = response.headers
+                            logging.debug("[%s] Token Data: %s" % (serverAddress,tokenData))
+                            if 'X-Auth-Token' in tokenData:
+                                tokenValue = tokenData['X-Auth-Token']
+                                if tokenData['Location'].startswith('https://'):
+                                    logoutURL = tokenData['Location']
+                                else:
+                                    logoutURL = "https://%s%s" % (serverAddress,tokenData['Location'])
+                                logging.info("[%s] Get Token Value successfully" % serverAddress)
+                                pass
                             else:
-                                logoutURL = "https://%s%s" % (serverAddress,tokenData['Location'])
-                            logging.info("[%s] Get Token Value successfully" % serverAddress)
-                            pass
-                        else:
-                            logging.error("[%s] Can't get X-Auth-Token from response headers" % serverAddress)
-                            return
-                    pass
-            except Exception as e:
-                logging.error("[%s] There is error when getting token: %s" % (serverAddress,e))
-                return
+                                logging.error("[%s] Can't get X-Auth-Token from response headers" % serverAddress)
+                        pass
+                    break
+                except Exception as e:
+                    logging.error("[%s] There is error when getting token: %s" % (serverAddress,e))
+
+                if attempt < 3:
+                    logging.debug("[%s] Retrying to get token (Attempt %d)" % (serverAddress, attempt + 1))
+                    await asyncio.sleep(1 * (2 ** (attempt - 1)))
+                else:
+                    logging.error("[%s] Failed to get token after 3 attempts" % serverAddress)
+                    return
         # vendorData = await fetch_all(childURIList,token)
         vendorData = (await rawDataCollector(serverAddress,commonSchema['Metadata'][basePoint],keyIDDict,tokenValue,logLevel))[0]
 
