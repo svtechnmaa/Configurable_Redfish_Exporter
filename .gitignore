@@ -2,3 +2,4 @@ src/redfish_collector/__pycache__/
 src/redfish_collector/profile_output*
 src/redfish_collector/core/__pycache__/
 src/redfish_collector/routers/__pycache__/
+test
