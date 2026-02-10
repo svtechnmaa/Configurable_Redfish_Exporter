@@ -60,11 +60,11 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
             return PlainTextResponse(metrics)
     try:
         dataRaw, dataNewSchema, modelSchemaDir = await dataCollector(serverAddress,username,password,templateDir,loglevel)
-        dataReconstructor(dataRaw, dataNewSchema, modelSchemaDir, serverAddress,loglevel)
+        collectedData = dataReconstructor(dataRaw, dataNewSchema, modelSchemaDir, serverAddress,loglevel)
 
-        dataDir = f'{REDFISH_DATA}NewData/{serverAddress}.json'
-        with open(dataDir, 'r') as file:
-            collectedData = json.load(file)
+        # dataDir = f'{REDFISH_DATA}NewData/{serverAddress}.json'
+        # with open(dataDir, 'r') as file:
+        #     collectedData = json.load(file)
 
         hostName = collectedData['Common'][0]['HostName']
         for metric in metricsConfig['Metrics']:

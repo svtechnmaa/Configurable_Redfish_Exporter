@@ -104,6 +104,7 @@ def dataReconstructor(dataRaw,dataNewSchema, templateDir, serverAddress,logLevel
     fileName = '%s.json' % serverAddress
     dataJSONWriter(newData,fileDir,fileName,serverAddress)
     logging.info("[%s] Generate data Raw successfully" % serverAddress)
+    return newData
 
 if __name__ == '__main__':
     serverAddress='10.97.99.1'
