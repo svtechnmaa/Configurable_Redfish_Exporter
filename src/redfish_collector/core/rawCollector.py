@@ -13,7 +13,7 @@ from aiohttp import ClientConnectorError, ClientResponseError, ClientTimeout, Cl
 
 
 
-def readYAMLTemplate(templateFile):
+def readYAMLTemplate(templateFile, serverAddress):
     config_file_path = path.join(path.dirname(__file__), templateFile)
     if path.isfile(config_file_path):
         with open(templateFile, 'r') as f:
@@ -171,7 +171,7 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
     # auth = (username,password)
     base = templateDir + "schemas/Common.yml"
     # base = templateDir + "schemas/HPEProLiantGen10.yml"
-    commonSchema=readYAMLTemplate(base)
+    commonSchema=readYAMLTemplate(base, serverAddress)
     if commonSchema is None:
         logging.error("[%s] Can't generate common schema, please check again" % serverAddress)
         return
@@ -256,7 +256,7 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
 
     # logging.info(vendorData)
     modelSchemaDir = templateDir + "schemas/" + modelSchema
-    schema=readYAMLTemplate(modelSchemaDir)
+    schema=readYAMLTemplate(modelSchemaDir, serverAddress)
     # logging.info(schema)
     dataNewSchema = schema['Data']
     if schema is None:

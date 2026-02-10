@@ -36,7 +36,7 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
             makedirs(REDFISH_DATA)
         try:
             metricsConfigFile = f'{templateDir}configs/{config}.yml'
-            metricsConfig = readYAMLTemplate(metricsConfigFile)
+            metricsConfig = readYAMLTemplate(metricsConfigFile, serverAddress)
             if "Auth" not in metricsConfig:
                 logging.error(f"[{serverAddress}] Can't find Auth in config file {config}")
                 componentMetrics['PhysicalServer_Query'].labels(str(serverAddress)).set(0)
