@@ -240,7 +240,7 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
         if i in manufacturer:
             logging.info("[%s] This's %s Server - Founded Vendor Name %s" % (serverAddress,i,manufacturer))
             for j in commonSchema['ModelSchema'][i]:
-                if j in model:
+                if str(j) in str(model):
                     logging.info("[%s] Model using %s - Founded Model Name %s" % (serverAddress,j,model))
                     modelSchema = commonSchema['ModelSchema'][i][j]
                     break
