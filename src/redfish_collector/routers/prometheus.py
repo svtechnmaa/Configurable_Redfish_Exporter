@@ -59,14 +59,28 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
             logging.error(f"[{serverAddress}] Metric collection failed: {err}", exc_info=True)
             return PlainTextResponse(metrics)
     try:
-        dataRaw, dataNewSchema, modelSchemaDir = await dataCollector(serverAddress,username,password,templateDir,loglevel)
+        collectorResult = await dataCollector(serverAddress,username,password,templateDir,loglevel)
+        if collectorResult is None:
+            # dataCollector returns None on auth / connection / schema failures
+            # (e.g. BMC unreachable, token denied). Report target down cleanly
+            # instead of crashing on a 3-tuple unpack of None.
+            logging.error(f"[{serverAddress}] Data collection returned no data (auth/connection/schema failure). Reporting target down.")
+            componentMetrics['PhysicalServer_Query'].labels(str(serverAddress)).set(0)
+            metrics = generate_latest(registry)
+            return PlainTextResponse(metrics)
+        dataRaw, dataNewSchema, modelSchemaDir = collectorResult
         collectedData = dataReconstructor(dataRaw, dataNewSchema, modelSchemaDir, serverAddress,loglevel)
 
         # dataDir = f'{REDFISH_DATA}NewData/{serverAddress}.json'
         # with open(dataDir, 'r') as file:
         #     collectedData = json.load(file)
 
-        hostName = collectedData['Common'][0]['HostName']
+        if not isinstance(collectedData, dict) or not collectedData.get('Common'):
+            logging.error(f"[{serverAddress}] Reconstructed data has no usable 'Common' section; server data incomplete/unreadable. Reporting target down.")
+            componentMetrics['PhysicalServer_Query'].labels(str(serverAddress)).set(0)
+            metrics = generate_latest(registry)
+            return PlainTextResponse(metrics)
+        hostName = collectedData['Common'][0].get('HostName', 'Unknown')
         for metric in metricsConfig['Metrics']:
             standard = ['Name', 'Description', 'Label', 'Datapoint', 'Result', 'Type']
             errorFlag = 0

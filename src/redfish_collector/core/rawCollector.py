@@ -96,9 +96,17 @@ async def fetch_all(urls: list, token, serverAddress):
         logging.error("[%s] Fetch all URL error: %s", serverAddress, e)
         raise
 
-async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLevel):
-    logFormat = '%(asctime)s [%(levelname)s] %(message)s'
-    logging.basicConfig(format=logFormat, level=logLevel.upper())
+async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLevel,session,semaphore):
+    # Logging is configured once at process start (uvicorn logging.yml / __main__);
+    # don't call logging.basicConfig() per request — it's a no-op after the first
+    # call anyway and mutates global logging state from inside the hot path.
+    #
+    # NOTE: keyDict is intentionally NOT copied here. The crawl relies on mutating
+    # it in place to hand extracted path keys (e.g. `serverid` from
+    # /redfish/v1/Systems/<id>, via the `>>serverid` directive in Common.yml) from
+    # the bootstrap crawl to the model-component crawls. The concurrency race is
+    # instead solved by giving each gathered top-level component its OWN copy at
+    # the call site in dataCollector (P0-2) — see `dict(keyIDDict)` there.
     logging.debug("[%s] Key schemaContent: %s" % (serverAddress,schemaContent))
     logging.debug("[%s] Key ID Dict: %s" % (serverAddress,keyDict))
     if isinstance(schemaContent,dict):
@@ -162,10 +170,7 @@ async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLe
         return []
 
 async def dataCollector(serverAddress,username,password,templateDir,logLevel):
-    # logging.getLogger().handlers[0].flush()
-    logFormat = '%(asctime)s [%(levelname)s] %(message)s'  
-    logging.basicConfig(format=logFormat, level=logLevel.upper())
-
+    # Logging is configured once at process start; no per-request basicConfig here.
     ### Read schema from schemas/Common.yml file
     # endpointURL = "https://%s" % serverAddress
     # auth = (username,password)
@@ -303,6 +308,9 @@ if __name__ == '__main__':
     logLevel='info'
     templateDir='./templates/'
 
+    # Standalone runs need logging configured here since the functions no longer
+    # call basicConfig themselves (the service configures it via logging.yml).
+    logging.basicConfig(format='%(asctime)s [%(levelname)s] %(message)s', level=logLevel.upper())
     dataRaw,dataNewSchema,modelSchemaDir = asyncio.run(dataCollector(serverAddress,username,password,templateDir,logLevel=logLevel))
     # logging.info(dataRaw)
 
