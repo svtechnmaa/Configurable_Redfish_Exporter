@@ -135,11 +135,36 @@ jobs:
     - name: Run App
       id: run_and_check_container_status
       if: steps.check_commit_message.outputs.no_ci != 'true'
-      uses: svtechnmaa/.github/actions/run_docker_container@main
-      with:
-        imageName: '${{ env.IMAGE_NAME }}'
-        containerName: '${{ env.CONTAINER_NAME }}'
-        containerMappingPort: '${{ env.CONTAINER_MAPPING_PORT }}'
+      shell: bash
+      run: |
+        docker run -d --name ${{ env.CONTAINER_NAME }} -p ${{ env.CONTAINER_MAPPING_PORT }} ${{ env.IMAGE_NAME }}
+
+    - name: Wait for container to be running
+      if: steps.check_commit_message.outputs.no_ci != 'true'
+      shell: bash
+      run: |
+        elapsed=0
+        while true; do
+          status=$(docker inspect --format '{{.State.Status}}' ${{ env.CONTAINER_NAME }})
+          echo "Container current status: $status"
+          if [ "$status" == "running" ]; then
+            echo "Container ${{ env.CONTAINER_NAME }} is running"
+            break
+          fi
+          if [ "$status" == "exited" ]; then
+            echo "Container ${{ env.CONTAINER_NAME }} is exited"
+            exit 1
+          fi
+          if [ $elapsed -ge $TIMEOUT ]; then
+            echo "Timeout reached: Container ${{ env.CONTAINER_NAME }} did not start successfully"
+            exit 1
+          fi
+          sleep $INTERVAL
+          elapsed=$((elapsed + INTERVAL))
+        done
+      env:
+        TIMEOUT: 300
+        INTERVAL: 3
 
     - name: Push image to GitHub Container Registry
       if: steps.check_commit_message.outputs.no_ci != 'true'
