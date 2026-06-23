@@ -140,6 +140,7 @@ jobs:
         docker run -d --name ${{ env.CONTAINER_NAME }} -p ${{ env.CONTAINER_MAPPING_PORT }} ${{ env.IMAGE_NAME }}
 
     - name: Wait for container to be running
+      if: steps.check_commit_message.outputs.no_ci != 'true'
       shell: bash
       run: |
         elapsed=0
