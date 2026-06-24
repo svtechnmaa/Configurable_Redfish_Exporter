@@ -15,7 +15,11 @@ def remove_odata_elements(d,notUseValue):
 
 def fixListConverter(data):
     if isinstance(data, dict):
-        if all(isinstance(member, int) for member in data.keys()):
+        # NOTE: `data and ...` is required — all() of an empty dict's keys is True,
+        # which would silently turn an empty {} into [], flipping the whole
+        # reconstructed structure from dict to list and crashing downstream
+        # (collectedData['Common'] -> TypeError). Empty dict must stay a dict.
+        if data and all(isinstance(member, int) for member in data.keys()):
             return [fixListConverter(value) for member, value in sorted(data.items())]
         else:
             return {member: fixListConverter(value) for member, value in data.items()}
@@ -45,7 +49,12 @@ def dataReconstructor(dataRaw,dataNewSchema, templateDir, serverAddress,logLevel
     dataTemplate = dict()
 
     elementFlag = None
-    for abspath in IdPoints:
+    for rawpath in IdPoints:
+        # jsonpath-ng >=1.x wraps full_path as e.g. '((Common.[0]).Id)'. This code
+        # parses the un-parenthesised form 'Common.[0].Id', so strip the parens.
+        # (Older jsonpath-ng emitted no parens, so stripping is a no-op there.)
+        # Keep `rawpath` for the IdPoints lookup; use `abspath` for path parsing.
+        abspath = rawpath.replace('(', '').replace(')', '')
         current = dataTemplate
         elements = re.split(r'\.|\[|\]', abspath)
         elements = [int(k) if k.isdigit() else k for k in elements if k != '']
@@ -56,9 +65,9 @@ def dataReconstructor(dataRaw,dataNewSchema, templateDir, serverAddress,logLevel
             current = current.setdefault(element, dict())
             if not isinstance(element,int):
                 schemaCurrent = schemaCurrent[element]
-        # logging.info(IdPoints[abspath])
+        # logging.info(IdPoints[rawpath])
         newDict = dict()
-        newDict['Id'] = IdPoints[abspath]
+        newDict['Id'] = IdPoints[rawpath]
         
         if elementFlag != elements[0]:
             rootElementDataRaw = {elements[0]: cleaned_data[elements[0]]}

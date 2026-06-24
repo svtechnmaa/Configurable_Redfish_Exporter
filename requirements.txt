@@ -1,9 +1,12 @@
-pyyaml
-jsonpath
-jsonpath-ng
+# Pinned to versions verified in this source checkout.
+PyYAML==6.0.3
+jsonpath-ng==1.8.0
+pydantic==2.6.4
+# The runtime/web stack below is NOT installed in this checkout, so exact
+# versions can't be verified here. Pin these from the deployment image's
+# `pip freeze` output to make builds fully reproducible.
 Jinja2
 prometheus_client
-pydantic
 uvicorn
 starlette
 fastapi

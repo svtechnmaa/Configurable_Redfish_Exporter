@@ -9,14 +9,24 @@ from jsonpath_ng.ext import parse
 # import aiohttp
 import asyncio
 from asyncio.exceptions import TimeoutError
-from aiohttp import ClientConnectorError, ClientResponseError, ClientTimeout, ClientSession
+from aiohttp import ClientConnectorError, ClientResponseError, ClientTimeout, ClientSession, TCPConnector
+
+# Global cap on simultaneous Redfish requests per scrape. A single shared
+# semaphore + shared connection pool (see dataCollector) is what actually bounds
+# the load on one BMC; without it the per-fetch_all semaphore multiplied across
+# recursion + gather and overran weak BMCs (broken pipe / connection resets).
+MAX_CONCURRENT_REQUESTS = 8
 
 
 
 def readYAMLTemplate(templateFile, serverAddress):
+    # Resolve a single path and use it for BOTH the existence check and the open.
+    # path.join ignores the module dir when templateFile is already absolute
+    # (the service passes absolute paths), so production behaviour is unchanged;
+    # this only fixes the relative-path case where isfile and open disagreed.
     config_file_path = path.join(path.dirname(__file__), templateFile)
     if path.isfile(config_file_path):
-        with open(templateFile, 'r') as f:
+        with open(config_file_path, 'r') as f:
             yamlContent = f.read()
             configData = yaml.safe_load(yamlContent)
             logging.debug("Component Schema Data: %s" % (configData))
@@ -67,38 +77,53 @@ async def fetch(url, token, session, serverAddress, semaphore: asyncio.Semaphore
         try:
             async with semaphore:
                 async with session.get(url, headers=headers, ssl=False) as response:
-                    response.raise_for_status() 
+                    response.raise_for_status()
                     return await response.json()
-        except (ClientConnectorError, ClientResponseError, TimeoutError, OSError) as e:
-            logging.debug("[%s] Attempt %s with url: %s failed: %s", serverAddress, attempt, url, e)
-            
-            if attempt == retries:
-                logging.error("[%s] Max retries reached. Giving up.", serverAddress)
-                statusCode = getattr(e, 'status', None) or getattr(e, 'code', 500)
-                return {"status": statusCode, "data": None, "success": False, "error_message": f"Request Error: {e} for URL {url}"}
-            else:
-                delay = backoffFactor * (2 ** (attempt - 1))
-                logging.debug("[%s] Retrying in %.2f seconds...", serverAddress, delay)
-                await asyncio.sleep(delay)
+        except ClientResponseError as e:
+            # 4xx (except 429) is permanent for this request: retrying just wastes
+            # load on an already-weak BMC and will never succeed. Fail fast.
+            if e.status < 500 and e.status != 429:
+                logging.error("[%s] Non-retryable HTTP %s for url %s: %s", serverAddress, e.status, url, e)
+                return {"status": e.status, "data": None, "success": False, "error_message": f"HTTP {e.status} for URL {url}"}
+            transientError = e
+        except (ClientConnectorError, TimeoutError, OSError) as e:
+            transientError = e
         except Exception as e:
             logging.error("[%s] Unexpected error during fetch: %s", serverAddress, e)
             return {"status": 500, "data": None, "success": False, "error_message": f"Unexpected error: {e} for URL {url}"}
 
-async def fetch_all(urls: list, token, serverAddress):
-    timeout = ClientTimeout(total=180)
-    semaphore = asyncio.Semaphore(8)
+        # transient failure (timeout / connection / 5xx / 429): back off and retry
+        logging.debug("[%s] Attempt %s with url: %s failed: %s", serverAddress, attempt, url, transientError)
+        if attempt == retries:
+            logging.error("[%s] Max retries reached. Giving up.", serverAddress)
+            statusCode = getattr(transientError, 'status', None) or getattr(transientError, 'code', 500)
+            return {"status": statusCode, "data": None, "success": False, "error_message": f"Request Error: {transientError} for URL {url}"}
+        delay = backoffFactor * (2 ** (attempt - 1))
+        logging.debug("[%s] Retrying in %.2f seconds...", serverAddress, delay)
+        await asyncio.sleep(delay)
+
+async def fetch_all(urls: list, token, serverAddress, session, semaphore):
+    # session + semaphore are owned by dataCollector and shared across the whole
+    # scrape, so concurrency is globally bounded instead of per-call.
     try:
-        async with ClientSession(timeout=timeout) as session:
-            tasks = [fetch(url, token, session, serverAddress,semaphore) for url in urls]
-            results = await asyncio.gather(*tasks)
-            return results
+        tasks = [fetch(url, token, session, serverAddress, semaphore) for url in urls]
+        results = await asyncio.gather(*tasks)
+        return results
     except Exception as e:
         logging.error("[%s] Fetch all URL error: %s", serverAddress, e)
         raise
 
-async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLevel):
-    logFormat = '%(asctime)s [%(levelname)s] %(message)s'
-    logging.basicConfig(format=logFormat, level=logLevel.upper())
+async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLevel,session,semaphore):
+    # Logging is configured once at process start (uvicorn logging.yml / __main__);
+    # don't call logging.basicConfig() per request — it's a no-op after the first
+    # call anyway and mutates global logging state from inside the hot path.
+    #
+    # NOTE: keyDict is intentionally NOT copied here. The crawl relies on mutating
+    # it in place to hand extracted path keys (e.g. `serverid` from
+    # /redfish/v1/Systems/<id>, via the `>>serverid` directive in Common.yml) from
+    # the bootstrap crawl to the model-component crawls. The concurrency race is
+    # instead solved by giving each gathered top-level component its OWN copy at
+    # the call site in dataCollector (P0-2) — see `dict(keyIDDict)` there.
     logging.debug("[%s] Key schemaContent: %s" % (serverAddress,schemaContent))
     logging.debug("[%s] Key ID Dict: %s" % (serverAddress,keyDict))
     if isinstance(schemaContent,dict):
@@ -122,7 +147,7 @@ async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLe
         logging.debug("[%s] Father URL: %s" % (serverAddress,url))
         # dataRaw = dict()
         if '$jsonpath' in schemaContent:
-            tempRaw = (await fetch_all([url],token,serverAddress))[0]
+            tempRaw = (await fetch_all([url],token,serverAddress,session,semaphore))[0]
             # dataRaw =dataRaw[0]
             childURIList = jsonpathCollector(tempRaw,str(schemaContent['$jsonpath']))
             # logging.info(childURIList)
@@ -132,7 +157,7 @@ async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLe
                 return
             else:
                 childURLList = ["https://%s%s" % (serverAddress,path) for path in childURIList]
-            dataRawList = await fetch_all(childURLList,token,serverAddress)
+            dataRawList = await fetch_all(childURLList,token,serverAddress,session,semaphore)
             if dataRawList is None:
                 logging.error("[%s] Get data failed" % serverAddress)
                 return dataRawList
@@ -146,14 +171,14 @@ async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLe
                         logging.debug("[%s] Updated key: %s" % (serverAddress,updatedKeyDict))
                         # keyDict.update(getKeyDictFromURLPath(childURL, schemaContent))
                         try:
-                            dataRawList[count][key] = await rawDataCollector(serverAddress,schemaContent[key],updatedKeyDict,token,logLevel)
+                            dataRawList[count][key] = await rawDataCollector(serverAddress,schemaContent[key],updatedKeyDict,token,logLevel,session,semaphore)
                             count+=1
                         except Exception as e:
                             logging.error("[%s] There error with %s" % (serverAddress,e))
             for childURL, _ in zip(childURLList,dataRawList):
                 keyDict.update(getKeyDictFromURLPath(childURL, schemaContent))
         else:
-            dataRawList = await fetch_all([url],token,serverAddress)
+            dataRawList = await fetch_all([url],token,serverAddress,session,semaphore)
             keyDict.update(getKeyDictFromURLPath(url, schemaContent))
             return dataRawList
         return dataRawList
@@ -162,10 +187,7 @@ async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLe
         return []
 
 async def dataCollector(serverAddress,username,password,templateDir,logLevel):
-    # logging.getLogger().handlers[0].flush()
-    logFormat = '%(asctime)s [%(levelname)s] %(message)s'  
-    logging.basicConfig(format=logFormat, level=logLevel.upper())
-
+    # Logging is configured once at process start; no per-request basicConfig here.
     ### Read schema from schemas/Common.yml file
     # endpointURL = "https://%s" % serverAddress
     # auth = (username,password)
@@ -179,16 +201,24 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
     keyIDDict = {}
     logging.debug("[%s] Type of commonSchema %s" % (serverAddress,type(commonSchema)))
 
-    for basePoint in commonSchema['Metadata']:
-        if "$tokenuri" in commonSchema['Metadata'][basePoint]:
-            tokenURL = "https://%s%s" % (serverAddress,commonSchema['Metadata'][basePoint]['$tokenuri'])
-            timeout = ClientTimeout(total=60)
-            payload = {"UserName": username,"Password": password}
-            logging.debug("[%s] token URL %s and Payload: %s" % (serverAddress,tokenURL,payload))
-            for attempt in range(1, 4):
-                try:
-                    async with ClientSession(timeout=timeout) as session:
-                        async with session.post(tokenURL,json=payload, ssl=False) as response:
+    # One shared connection pool + semaphore for the WHOLE scrape (token POST,
+    # every crawl request and logout). This is the core weak-BMC fix: total
+    # concurrent requests to a single BMC are bounded by MAX_CONCURRENT_REQUESTS
+    # instead of being multiplied per fetch_all call, and the TCP/TLS connection
+    # is reused throughout.
+    tokenValue = None
+    logoutURL = None
+    connector = TCPConnector(limit=MAX_CONCURRENT_REQUESTS, limit_per_host=MAX_CONCURRENT_REQUESTS, ssl=False)
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    async with ClientSession(connector=connector, timeout=ClientTimeout(total=180)) as session:
+        for basePoint in commonSchema['Metadata']:
+            if "$tokenuri" in commonSchema['Metadata'][basePoint]:
+                tokenURL = "https://%s%s" % (serverAddress,commonSchema['Metadata'][basePoint]['$tokenuri'])
+                payload = {"UserName": username,"Password": password}
+                logging.debug("[%s] token URL %s and Payload: %s" % (serverAddress,tokenURL,payload))
+                for attempt in range(1, 4):
+                    try:
+                        async with session.post(tokenURL,json=payload, ssl=False, timeout=ClientTimeout(total=60)) as response:
                             response.raise_for_status()
                             tokenData = response.headers
                             logging.debug("[%s] Token Data: %s" % (serverAddress,tokenData))
@@ -202,83 +232,100 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
                                 break
                             else:
                                 logging.error("[%s] Can't get X-Auth-Token from response headers" % serverAddress)
-                except (ClientConnectorError, ClientResponseError, TimeoutError) as e:
-                    logging.error("[%s] There is error when getting token: %s" % (serverAddress,e))
+                    except ClientResponseError as e:
+                        # 401/403/404 etc. = wrong creds / wrong token URI. Retrying
+                        # 3× won't help and only loads the BMC — abort immediately.
+                        if e.status < 500 and e.status != 429:
+                            logging.error("[%s] Auth failed (HTTP %s), not retrying: %s" % (serverAddress, e.status, e))
+                            return
+                        logging.error("[%s] Transient error when getting token: %s" % (serverAddress,e))
+                    except (ClientConnectorError, TimeoutError) as e:
+                        logging.error("[%s] There is error when getting token: %s" % (serverAddress,e))
 
-                if attempt < 3:
-                    logging.debug("[%s] Retrying to get token (Attempt %d)" % (serverAddress, attempt + 1))
-                    await asyncio.sleep(2 ** (attempt - 1))
-                else:
-                    logging.error("[%s] Failed to get token after 3 attempts" % serverAddress)
-                    return
-                
-        vendorData = (await rawDataCollector(serverAddress,commonSchema['Metadata'][basePoint],keyIDDict,tokenValue,logLevel))[0]
+                    if attempt < 3:
+                        logging.debug("[%s] Retrying to get token (Attempt %d)" % (serverAddress, attempt + 1))
+                        await asyncio.sleep(2 ** (attempt - 1))
+                    else:
+                        logging.error("[%s] Failed to get token after 3 attempts" % serverAddress)
+                        return
 
-    if 'Manufacturer' in vendorData:
-        manufacturer = vendorData['Manufacturer']
-        logging.debug("[%s] Manufacturer: %s" % (serverAddress,manufacturer))
-    else:
-        logging.error("[%s] We can't generate Manufacturer value, Please check JSONPath or else!" % serverAddress)
-        return
-    
-    if 'Model' in vendorData:
-        model = vendorData['Model']
-        logging.debug("[%s] Model: %s" % (serverAddress,model))
-    else:
-        logging.error("[%s] We can't generate Model value, Please check JSONPath or else!" % serverAddress)
-        return
+            if tokenValue is None:
+                logging.error("[%s] No auth token available, aborting collect" % serverAddress)
+                return
+            commonRaw = await rawDataCollector(serverAddress,commonSchema['Metadata'][basePoint],keyIDDict,tokenValue,logLevel,session,semaphore)
+            if not commonRaw:
+                # rawDataCollector returns [] / None when it can't read the base
+                # Redfish data (e.g. /redfish/v1/Systems on a weak/unreachable BMC).
+                # Abort cleanly so the caller emits PhysicalServer_Query=0 instead of
+                # crashing on an empty index.
+                logging.error("[%s] Could not read base Redfish data (e.g. /redfish/v1/Systems); aborting collect" % serverAddress)
+                return
+            vendorData = commonRaw[0]
 
-    if 'Id' in vendorData:
-        vendorId = vendorData['Id']
-        logging.debug("[%s] VendorId: %s" % (serverAddress,vendorId))
-    else:
-        logging.error("[%s] We can't generate VendorId value, Please check JSONPath or else!" % serverAddress)
-        return
-
-    modelSchema = None
-    for i in commonSchema['ModelSchema']:
-        if i in manufacturer:
-            logging.info("[%s] This's %s Server - Founded Vendor Name %s" % (serverAddress,i,manufacturer))
-            for j in commonSchema['ModelSchema'][i]:
-                if str(j) in str(model):
-                    logging.info("[%s] Model using %s - Founded Model Name %s" % (serverAddress,j,model))
-                    modelSchema = commonSchema['ModelSchema'][i][j]
-                    break
-                else:
-                    logging.debug("[%s] Model isn't %s - Founded Model Name %s" % (serverAddress,j,model))        
+        if 'Manufacturer' in vendorData:
+            manufacturer = vendorData['Manufacturer']
+            logging.debug("[%s] Manufacturer: %s" % (serverAddress,manufacturer))
         else:
-            logging.debug("[%s] This's not %s Server - Founded Vendor Name %s" % (serverAddress,i,manufacturer))
-    if modelSchema:
-        logging.info("[%s] We will generate data model with schema file: %s" % (serverAddress,modelSchema))
-    else:
-        logging.error("[%s] We couldn't find any schema similar with server model: %s. Please check schema directory" % (serverAddress,model))
-        return
+            logging.error("[%s] We can't generate Manufacturer value, Please check JSONPath or else!" % serverAddress)
+            return
 
-    # logging.info(vendorData)
-    modelSchemaDir = templateDir + "schemas/" + modelSchema
-    schema=readYAMLTemplate(modelSchemaDir, serverAddress)
-    # logging.info(schema)
-    dataNewSchema = schema['Data']
-    if schema is None:
-        logging.error("[%s] Can't generate vendor schema, please check again" % serverAddress)
-        return
-    data = [rawDataCollector(serverAddress,schema['Metadata'][component],keyIDDict,tokenValue,logLevel) for component in schema['Metadata']]
-    results = await asyncio.gather(*data)
-    dataRaw = dict()
-    try:
-        timeout = ClientTimeout(total=60)
-        async with ClientSession(timeout=timeout) as session:
-            async with session.delete(logoutURL, headers={'X-Auth-Token': tokenValue}, ssl=False) as response:
+        if 'Model' in vendorData:
+            model = vendorData['Model']
+            logging.debug("[%s] Model: %s" % (serverAddress,model))
+        else:
+            logging.error("[%s] We can't generate Model value, Please check JSONPath or else!" % serverAddress)
+            return
+
+        if 'Id' in vendorData:
+            vendorId = vendorData['Id']
+            logging.debug("[%s] VendorId: %s" % (serverAddress,vendorId))
+        else:
+            logging.error("[%s] We can't generate VendorId value, Please check JSONPath or else!" % serverAddress)
+            return
+
+        modelSchema = None
+        for i in commonSchema['ModelSchema']:
+            if i in manufacturer:
+                logging.info("[%s] This's %s Server - Founded Vendor Name %s" % (serverAddress,i,manufacturer))
+                for j in commonSchema['ModelSchema'][i]:
+                    if str(j) in str(model):
+                        logging.info("[%s] Model using %s - Founded Model Name %s" % (serverAddress,j,model))
+                        modelSchema = commonSchema['ModelSchema'][i][j]
+                        break
+                    else:
+                        logging.debug("[%s] Model isn't %s - Founded Model Name %s" % (serverAddress,j,model))
+            else:
+                logging.debug("[%s] This's not %s Server - Founded Vendor Name %s" % (serverAddress,i,manufacturer))
+        if modelSchema:
+            logging.info("[%s] We will generate data model with schema file: %s" % (serverAddress,modelSchema))
+        else:
+            logging.error("[%s] We couldn't find any schema similar with server model: %s. Please check schema directory" % (serverAddress,model))
+            return
+
+        # logging.info(vendorData)
+        modelSchemaDir = templateDir + "schemas/" + modelSchema
+        schema=readYAMLTemplate(modelSchemaDir, serverAddress)
+        # logging.info(schema)
+        dataNewSchema = schema['Data']
+        if schema is None:
+            logging.error("[%s] Can't generate vendor schema, please check again" % serverAddress)
+            return
+        # Each top-level component gets its OWN copy of keyIDDict so the
+        # concurrently-gathered crawls can't race on a shared dict (P0-2 fix).
+        data = [rawDataCollector(serverAddress,schema['Metadata'][component],dict(keyIDDict),tokenValue,logLevel,session,semaphore) for component in schema['Metadata']]
+        results = await asyncio.gather(*data)
+        dataRaw = dict()
+        try:
+            async with session.delete(logoutURL, headers={'X-Auth-Token': tokenValue}, ssl=False, timeout=ClientTimeout(total=60)) as response:
                 if response.status == 200 or response.status == 204:
                     logging.info("[%s] Logged out successfully" % serverAddress)
-                    pass
                 else:
                     logging.error("[%s] Logout failed with status code: %s" % (serverAddress,response.status))
-            pass
-    except Exception as e:
-        logging.error("[%s] There is error when logout: %s" % (serverAddress,e))
-        return
-    
+        except Exception as e:
+            logging.error("[%s] There is error when logout: %s" % (serverAddress,e))
+            return
+
+
     for component, result in zip(schema['Metadata'], results):
         dataRaw[component] = result
     logging.debug("[%s] DataRaw: %s" % (serverAddress,dataRaw))
@@ -303,6 +350,9 @@ if __name__ == '__main__':
     logLevel='info'
     templateDir='./templates/'
 
+    # Standalone runs need logging configured here since the functions no longer
+    # call basicConfig themselves (the service configures it via logging.yml).
+    logging.basicConfig(format='%(asctime)s [%(levelname)s] %(message)s', level=logLevel.upper())
     dataRaw,dataNewSchema,modelSchemaDir = asyncio.run(dataCollector(serverAddress,username,password,templateDir,logLevel=logLevel))
     # logging.info(dataRaw)
 
