@@ -224,10 +224,18 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
                             logging.debug("[%s] Token Data: %s" % (serverAddress,tokenData))
                             if 'X-Auth-Token' in tokenData:
                                 tokenValue = tokenData['X-Auth-Token']
-                                if tokenData['Location'].startswith('https://'):
-                                    logoutURL = tokenData['Location']
+                                # Some Redfish BMCs omit (or oddly format) the
+                                # Location header; .get() avoids a KeyError. Without
+                                # it we still have a valid token, so proceed and just
+                                # skip logout (logoutURL stays None).
+                                location = tokenData.get('Location')
+                                if location:
+                                    if location.startswith('https://'):
+                                        logoutURL = location
+                                    else:
+                                        logoutURL = "https://%s%s" % (serverAddress,location)
                                 else:
-                                    logoutURL = "https://%s%s" % (serverAddress,tokenData['Location'])
+                                    logging.warning("[%s] Token response has no 'Location' header; will skip logout" % serverAddress)
                                 logging.info("[%s] Get Token Value successfully" % serverAddress)
                                 break
                             else:
@@ -306,24 +314,29 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
         modelSchemaDir = templateDir + "schemas/" + modelSchema
         schema=readYAMLTemplate(modelSchemaDir, serverAddress)
         # logging.info(schema)
-        dataNewSchema = schema['Data']
-        if schema is None:
+        if schema is None or not isinstance(schema, dict) or 'Data' not in schema or 'Metadata' not in schema:
             logging.error("[%s] Can't generate vendor schema, please check again" % serverAddress)
             return
+        dataNewSchema = schema['Data']
         # Each top-level component gets its OWN copy of keyIDDict so the
         # concurrently-gathered crawls can't race on a shared dict (P0-2 fix).
         data = [rawDataCollector(serverAddress,schema['Metadata'][component],dict(keyIDDict),tokenValue,logLevel,session,semaphore) for component in schema['Metadata']]
         results = await asyncio.gather(*data)
         dataRaw = dict()
-        try:
-            async with session.delete(logoutURL, headers={'X-Auth-Token': tokenValue}, ssl=False, timeout=ClientTimeout(total=60)) as response:
-                if response.status == 200 or response.status == 204:
-                    logging.info("[%s] Logged out successfully" % serverAddress)
-                else:
-                    logging.error("[%s] Logout failed with status code: %s" % (serverAddress,response.status))
-        except Exception as e:
-            logging.error("[%s] There is error when logout: %s" % (serverAddress,e))
-            return
+        # Only attempt logout when we actually have a session URI; a missing
+        # Location header leaves logoutURL=None (see token acquisition above).
+        if logoutURL:
+            try:
+                async with session.delete(logoutURL, headers={'X-Auth-Token': tokenValue}, ssl=False, timeout=ClientTimeout(total=60)) as response:
+                    if response.status == 200 or response.status == 204:
+                        logging.info("[%s] Logged out successfully" % serverAddress)
+                    else:
+                        logging.error("[%s] Logout failed with status code: %s" % (serverAddress,response.status))
+            except Exception as e:
+                logging.error("[%s] There is error when logout: %s" % (serverAddress,e))
+                return
+        else:
+            logging.warning("[%s] No logout URL (Location missing); skipping logout" % serverAddress)
 
 
     for component, result in zip(schema['Metadata'], results):
