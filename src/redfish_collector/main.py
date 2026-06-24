@@ -5,8 +5,6 @@ import uvicorn
 import argparse
 from os import path
 
-REDFISH_DATA = '/tmp/redfish-data/'
-
 app = FastAPI(title="Redfish Collector", description="Redfish DMTF Collector using for physical server monitoring")
 app.include_router(prometheus.router)
 
@@ -15,7 +13,9 @@ def main():
 
     parser.add_argument('--host', type=str, dest='host', default='0.0.0.0', help='address to serve on')
     parser.add_argument('--port', type=int, dest='port', default=9814, help='port to bind')
-    parser.add_argument('--rotate', type=int, dest='rotate', default=300, help='log rotate interval in seconds')
+    # NOTE: --rotate is accepted for backward compatibility but not yet wired to
+    # any behaviour. Kept as a no-op so existing launch commands don't break.
+    parser.add_argument('--rotate', type=int, dest='rotate', default=300, help='log rotate interval in seconds (currently unused)')
     parser.add_argument('--workers', type=int, dest='workers', default=4, help='Number of worker processes to run Uvicorn')
 
     args = parser.parse_args()
