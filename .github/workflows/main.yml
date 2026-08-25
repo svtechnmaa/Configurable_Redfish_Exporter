@@ -244,3 +244,15 @@ jobs:
   #       run: |
   #         docker tag ghcr.io/${{ github.repository_owner }}/redfish-exporter:${{ env.IMAGE_TAG }} ghcr.io/${{ github.repository_owner }}/redfish-exporter:latest
   #         docker push ghcr.io/${{ github.repository_owner }}/redfish-exporter:latest
+
+  check_job_results:
+    name: Check job results
+    if: always()
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        uses: svtechnmaa/.github/actions/check_job_results@main
+        with:
+          jobs: ${{ toJSON(needs) }}
