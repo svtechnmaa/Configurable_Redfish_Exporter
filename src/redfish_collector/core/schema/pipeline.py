@@ -9,6 +9,7 @@ real, authenticated, dispatcher-bounded `fetch`.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from ..batching import DEFAULT_BATCH_SIZE
@@ -17,6 +18,8 @@ from .executor import ExecutedRecord, ExecutorError, FetchFunc, TelemetryReducer
 from .legacy import collect_legacy_lane, derive_serverid_from_system_uri, select_legacy_vendor_schema
 from .models import CommonSchemaV2, LegacySchema, VendorModelSchemaV2
 from .selection import SchemaSelectionError, select_v2_model_schema
+
+logger = logging.getLogger(__name__)
 
 
 async def collect_v2_resources(
@@ -44,12 +47,28 @@ async def collect_v2_resources(
     executed: dict[str, list[ExecutedRecord]] = {}
     for name in lane_resources:
         resource = vendor_schema.resources[name]
-        records = await execute_resource(
-            resource, fetch=fetch, context=context, resource_raw_by_name=resource_raw_by_name,
-            telemetry_reducer=telemetry_reducer, batch_size=batch_size,
-            pagination_next_link_paths=pagination_next_link_paths,
-            pagination_max_pages=pagination_max_pages, max_members=max_members,
-        )
+        try:
+            records = await execute_resource(
+                resource, fetch=fetch, context=context, resource_raw_by_name=resource_raw_by_name,
+                telemetry_reducer=telemetry_reducer, batch_size=batch_size,
+                pagination_next_link_paths=pagination_next_link_paths,
+                pagination_max_pages=pagination_max_pages, max_members=max_members,
+            )
+        except ExecutorError as exc:
+            # `Required` (contract §5): a required resource's failure is
+            # lane-scoped-fatal — re-raise unchanged so the caller's existing
+            # `except ExecutorError` -> `TargetSelectionError` path applies.
+            # An optional resource's failure (the default) must NOT abort
+            # the rest of the lane — every other declared resource still
+            # gets a chance to collect. Recorded as an empty result, which
+            # `extract_v2_components` already treats as "this resource
+            # produced nothing" (never as a crash), i.e. the contract's
+            # "Optional resource failure omits that resource."
+            if resource.required:
+                raise
+            logger.warning("optional resource %r failed and was omitted: %s", name, exc)
+            executed[name] = []
+            continue
         await execute_children(
             resource, records, fetch=fetch, context=context, resource_raw_by_name=resource_raw_by_name,
             telemetry_reducer=telemetry_reducer, max_depth=max_depth, batch_size=batch_size,
