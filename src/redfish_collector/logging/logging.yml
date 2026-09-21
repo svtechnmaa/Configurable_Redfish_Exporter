@@ -7,15 +7,25 @@ formatters:
   access:
     # "()": uvicorn.logging.AccessFormatter
     format: '%(asctime)s [%(levelname)s] %(message)s'
+filters:
+  # Defense-in-depth backstop (research.md §12, FR-035, SC-018): scrubs
+  # known-secret patterns (passwords, tokens, Authorization/X-Auth-Token
+  # headers, URL userinfo) from any log record before it leaves the
+  # process. Attached to every handler — callers must still construct
+  # messages from safe fields; this filter is not the primary mechanism.
+  redacting:
+    "()": redfish_collector.core.security.redaction.RedactingFilter
 handlers:
   default:
     formatter: default
     class: logging.StreamHandler
     stream: ext://sys.stderr
+    filters: [redacting]
   defaultfile:
     formatter: default
     class: logging.FileHandler
     filename: /tmp/app.log
+    filters: [redacting]
   # access:
   #   formatter: access
   #   class: logging.StreamHandler
@@ -24,7 +34,8 @@ handlers:
     formatter: access
     class: logging.FileHandler
     filename: /tmp/access.log
-  
+    filters: [redacting]
+
 loggers:
   uvicorn.error:
     level: DEBUG

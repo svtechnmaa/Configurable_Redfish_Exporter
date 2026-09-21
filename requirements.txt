@@ -1,13 +1,14 @@
-# Pinned to versions verified in this source checkout.
+# NOTE: this file has no consumer in this repository (neither the Dockerfile
+# nor scripts/test-env.sh reads it) — `setup.py`'s `install_requires` is the
+# actual single source of truth for dependency resolution. Kept here, exactly
+# mirroring setup.py, as a plain-text reference only; update both together.
 PyYAML==6.0.3
 jsonpath-ng==1.8.0
-pydantic==2.6.4
-# The runtime/web stack below is NOT installed in this checkout, so exact
-# versions can't be verified here. Pin these from the deployment image's
-# `pip freeze` output to make builds fully reproducible.
-Jinja2
-prometheus_client
-uvicorn
-starlette
-fastapi
-aiohttp
+pydantic==2.13.5
+Jinja2==3.1.6
+prometheus_client==0.26.0
+uvicorn==0.52.4
+starlette==1.6.0
+fastapi==0.141.1
+aiohttp==3.14.3
+python-dotenv==1.2.3

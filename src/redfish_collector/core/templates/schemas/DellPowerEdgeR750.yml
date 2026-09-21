@@ -1,0 +1,265 @@
+# Best-effort v2 schema for Dell PowerEdge R750. UNLIKE every other shipped
+# schema, there is no prior v1 DellPowerEdgeR750.yml to migrate — the
+# shipped file was empty while Common.yml already selected it (a pre-
+# existing gap; see `research.md`). This schema is built ONLY from standard
+# Redfish resource shapes and field mappings already used and exercised by
+# this repository's OTHER Dell schemas (R630/R650/R6515) and their
+# fixtures — no field or resource here is invented from unverified vendor
+# documentation. Live R750 hardware compatibility is EXPLICITLY UNVERIFIED
+# (no live BMC access, no R750-specific fixture); do not treat this schema
+# as field-tested against real R750 firmware output. Uses the WORKING
+# PowerSupplies/PowerControl `MemberId` mapping shared by R630/R6515 (their
+# own JSONPath genuinely matches list-wrapped Redfish Power data), not
+# R650's specific broken v1-compatibility-preserving JSONPath (a documented
+# R650-only legacy bug this schema has no reason to replicate).
+Version: 2
+Kind: VendorModelSchema
+Model: Dell PowerEdge R750
+Collection:
+  Fast:
+    Resources: [Common]
+  Slow:
+    Resources: [ArrayController, MemoryDIMM, EthernetInterface, Processor, Thermal, Power]
+Resources:
+  Common:
+    Strategies:
+      - Id: main
+        Kind: object
+        URI: "/redfish/v1/Systems/{{ system_id }}"
+  ArrayController:
+    Strategies:
+      - Id: main
+        Kind: collection
+        URI: "/redfish/v1/Systems/{{ system_id }}/Storage"
+        Members: '$.Members[*]."@odata.id"'
+        Children:
+          PhysicalDrive:
+            Strategies:
+              - Id: main
+                Kind: inline-collection
+                Members: "$.Drives[*]"
+  MemoryDIMM:
+    Strategies:
+      - Id: main
+        Kind: collection
+        URI: "/redfish/v1/Systems/{{ system_id }}/Memory"
+        Members: '$.Members[*]."@odata.id"'
+  EthernetInterface:
+    Strategies:
+      - Id: main
+        Kind: collection
+        URI: "/redfish/v1/Systems/{{ system_id }}/EthernetInterfaces"
+        Members: '$.Members[*]."@odata.id"'
+  Processor:
+    Strategies:
+      - Id: main
+        Kind: collection
+        URI: "/redfish/v1/Systems/{{ system_id }}/Processors"
+        Members: '$.Members[*]."@odata.id"'
+  Thermal:
+    Strategies:
+      - Id: main
+        Kind: object
+        URI: "/redfish/v1/Chassis/{{ system_id }}/Thermal"
+        Children:
+          Fans:
+            Strategies:
+              - Id: main
+                Kind: inline-collection
+                Members: "$.Fans[*]"
+          Temperatures:
+            Strategies:
+              - Id: main
+                Kind: inline-collection
+                Members: "$.Temperatures[*]"
+  Power:
+    Strategies:
+      - Id: main
+        Kind: object
+        URI: "/redfish/v1/Chassis/{{ system_id }}/Power"
+        Children:
+          PowerSupplies:
+            Strategies:
+              - Id: main
+                Kind: inline-collection
+                Members: "$.PowerSupplies[*]"
+          PowerControl:
+            Strategies:
+              - Id: main
+                Kind: inline-collection
+                Members: "$.PowerControl[*]"
+
+Components:
+  Common:
+    Records: {Resource: Common, Select: object}
+    Identity: {Select: [{Path: "$.Id"}]}
+    Fields:
+      AssetTag: {Type: string, Select: [{Path: "$.AssetTag"}]}
+      BiosVersion: {Type: string, Select: [{Path: "$.BiosVersion"}]}
+      HostName: {Type: string, Select: [{Path: "$.HostName"}]}
+      IndicatorLED: {Type: string, Select: [{Path: "$.IndicatorLED"}]}
+      Manufacturer: {Type: string, Select: [{Path: "$.Manufacturer"}]}
+      MemoryHealthRollupStatus: {Type: string, Select: [{Path: "$.MemorySummary.Status.HealthRollup"}]}
+      TotalSystemMemoryGiB: {Type: number, Select: [{Path: "$.MemorySummary.TotalSystemMemoryGiB"}]}
+      Model: {Type: string, Select: [{Path: "$.Model"}]}
+      Name: {Type: string, Select: [{Path: "$.Name"}]}
+      PowerState: {Type: string, Select: [{Path: "$.PowerState"}]}
+      ProcessorCountSummary: {Type: number, Select: [{Path: "$.ProcessorSummary.Count"}]}
+      ProcessorModelSummary: {Type: string, Select: [{Path: "$.ProcessorSummary.Model"}]}
+      ProcessorHealthRollupStatus: {Type: string, Select: [{Path: "$.ProcessorSummary.Status.HealthRollup"}]}
+      SKU: {Type: string, Select: [{Path: "$.SKU"}]}
+      SerialNumber: {Type: string, Select: [{Path: "$.SerialNumber"}]}
+      Status: {Type: status, Select: [{Path: "$.Status"}]}
+      SystemType: {Type: string, Select: [{Path: "$.SystemType"}]}
+      UUID: {Type: string, Select: [{Path: "$.UUID"}]}
+
+  ArrayController:
+    Records: {Resource: ArrayController, Select: members}
+    Identity: {Select: [{Path: "$.Id"}]}
+    Fields:
+      AdapterType: {Type: string, Select: [{Path: "$.AdapterType"}]}
+      ControllerPartNumber: {Type: string, Select: [{Path: "$.ControllerPartNumber"}]}
+      CurrentOperatingMode: {Type: string, Select: [{Path: "$.CurrentOperatingMode"}]}
+      Description: {Type: string, Select: [{Path: "$.Description"}]}
+      DriveWriteCache: {Type: string, Select: [{Path: "$.DriveWriteCache"}]}
+      HardwareRevision: {Type: string, Select: [{Path: "$.HardwareRevision"}]}
+      InternalPortCount: {Type: number, Select: [{Path: "$.InternalPortCount"}]}
+      Location: {Type: string, Select: [{Path: "$.Location"}]}
+      LocationFormat: {Type: string, Select: [{Path: "$.LocationFormat"}]}
+      Model: {Type: string, Select: [{Path: "$.StorageControllers.[0].Model"}]}
+      Manufacturer: {Type: string, Select: [{Path: "$.StorageControllers.[0].Manufacturer"}]}
+      Name: {Type: string, Select: [{Path: "$.Name"}]}
+      ReadCachePercent: {Type: number, Select: [{Path: "$.ReadCachePercent"}]}
+      SerialNumber: {Type: string, Select: [{Path: "$.SerialNumber"}]}
+      WriteCacheWithoutBackupPowerEnabled: {Type: boolean, Select: [{Path: "$.WriteCacheWithoutBackupPowerEnabled"}]}
+      Status: {Type: status, Select: [{Path: "$.Status"}]}
+    Children:
+      PhysicalDrive:
+        Records: {Resource: ArrayController.PhysicalDrive, Select: members}
+        Identity: {Select: [{Path: "$.Id"}]}
+        Fields:
+          SerialNumber: {Type: string, Select: [{Path: "$.SerialNumber"}]}
+          BlockSizeBytes: {Type: number, Select: [{Path: "$.BlockSizeBytes"}]}
+          CapacityBytes: {Type: number, Select: [{Path: "$.CapacityBytes"}]}
+          CapacityLogicalBlocks: {Type: number, Select: [{Path: "$.CapacityLogicalBlocks"}]}
+          CarrierApplicationVersion: {Type: string, Select: [{Path: "$.CarrierApplicationVersion"}]}
+          InterfaceSpeedMbps: {Type: number, Select: [{Path: "$.InterfaceSpeedMbps"}]}
+          InterfaceType: {Type: string, Select: [{Path: "$.InterfaceType"}]}
+          LegacyBootPriority: {Type: string, Select: [{Path: "$.LegacyBootPriority"}]}
+          Location: {Type: string, Select: [{Path: "$.Location"}]}
+          LocationFormat: {Type: string, Select: [{Path: "$.LocationFormat"}]}
+          MediaType: {Type: string, Select: [{Path: "$.MediaType"}]}
+          Model: {Type: string, Select: [{Path: "$.Model"}]}
+          Manufacturer: {Type: string, Select: [{Path: "$.Manufacturer"}]}
+          Description: {Type: string, Select: [{Path: "$.Description"}]}
+          Name: {Type: string, Select: [{Path: "$.Name"}]}
+          PowerOnHours: {Type: number, Select: [{Path: "$.PowerOnHours"}]}
+          SSDEnduranceUtilizationPercentage: {Type: number, Select: [{Path: "$.PredictedMediaLifeLeftPercent"}]}
+          UncorrectedReadErrors: {Type: number, Select: [{Path: "$.UncorrectedReadErrors"}]}
+          UncorrectedWriteErrors: {Type: number, Select: [{Path: "$.UncorrectedWriteErrors"}]}
+          Status: {Type: status, Select: [{Path: "$.Status"}]}
+
+  MemoryDIMM:
+    Records: {Resource: MemoryDIMM, Select: members}
+    Identity: {Select: [{Path: "$.Id"}]}
+    Fields:
+      BusWidthBits: {Type: number, Select: [{Path: "$.BusWidthBits"}]}
+      CacheSizeMiB: {Type: number, Select: [{Path: "$.CacheSizeMiB"}]}
+      CapacityMiB: {Type: number, Select: [{Path: "$.CapacityMiB"}]}
+      DataWidthBits: {Type: number, Select: [{Path: "$.DataWidthBits"}]}
+      DeviceLocator: {Type: string, Select: [{Path: "$.DeviceLocator"}]}
+      ErrorCorrection: {Type: string, Select: [{Path: "$.ErrorCorrection"}]}
+      LogicalSizeMiB: {Type: number, Select: [{Path: "$.LogicalSizeMiB"}]}
+      MemoryLocation: {Type: object, Select: [{Path: "$.MemoryLocation"}]}
+      MemoryType: {Type: string, Select: [{Path: "$.MemoryType"}]}
+      Name: {Type: string, Select: [{Path: "$.Name"}]}
+      NonVolatileSizeMiB: {Type: number, Select: [{Path: "$.NonVolatileSizeMiB"}]}
+      PersistentRegionSizeLimitMiB: {Type: number, Select: [{Path: "$.PersistentRegionSizeLimitMiB"}]}
+      RankCount: {Type: number, Select: [{Path: "$.RankCount"}]}
+      VolatileRegionSizeLimitMiB: {Type: number, Select: [{Path: "$.VolatileRegionSizeLimitMiB"}]}
+      VolatileSizeMiB: {Type: number, Select: [{Path: "$.VolatileSizeMiB"}]}
+      Status: {Type: status, Select: [{Path: "$.Status"}]}
+
+  EthernetInterface:
+    Records: {Resource: EthernetInterface, Select: members}
+    Identity: {Select: [{Path: "$.Id"}]}
+    Fields:
+      FullDuplex: {Type: boolean, Select: [{Path: "$.FullDuplex"}]}
+      InterfaceEnabled: {Type: boolean, Select: [{Path: "$.InterfaceEnabled"}]}
+      LinkStatus: {Type: string, Select: [{Path: "$.LinkStatus"}]}
+      MACAddress: {Type: string, Select: [{Path: "$.MACAddress"}]}
+      Name: {Type: string, Select: [{Path: "$.Name"}]}
+      SpeedMbps: {Type: number, Select: [{Path: "$.SpeedMbps"}]}
+      Status: {Type: status, Select: [{Path: "$.Status"}]}
+      UefiDevicePath: {Type: string, Select: [{Path: "$.UefiDevicePath"}]}
+
+  Processor:
+    Records: {Resource: Processor, Select: members}
+    Identity: {Select: [{Path: "$.Id"}]}
+    Fields:
+      InstructionSet: {Type: string, Select: [{Path: "$.InstructionSet"}]}
+      Manufacturer: {Type: string, Select: [{Path: "$.Manufacturer"}]}
+      MaxSpeedMHz: {Type: number, Select: [{Path: "$.MaxSpeedMHz"}]}
+      Model: {Type: string, Select: [{Path: "$.Model"}]}
+      Name: {Type: string, Select: [{Path: "$.Name"}]}
+      ProcessorArchitecture: {Type: string, Select: [{Path: "$.ProcessorArchitecture"}]}
+      ProcessorType: {Type: string, Select: [{Path: "$.ProcessorType"}]}
+      Socket: {Type: string, Select: [{Path: "$.Socket"}]}
+      TotalCores: {Type: number, Select: [{Path: "$.TotalCores"}]}
+      TotalThreads: {Type: number, Select: [{Path: "$.TotalThreads"}]}
+      Status: {Type: status, Select: [{Path: "$.Status"}]}
+
+  Power:
+    Records: {Resource: Power, Select: object}
+    Identity: {Select: [{Path: "$.Id"}]}
+    Fields:
+      Name: {Type: string, Select: [{Path: "$.Name"}]}
+    Children:
+      PowerSupplies:
+        Records: {Resource: Power.PowerSupplies, Select: members}
+        Identity: {Select: [{Path: "$.MemberId"}]}
+        Fields:
+          Model: {Type: string, Select: [{Path: "$.Model"}]}
+          Name: {Type: string, Select: [{Path: "$.Name"}]}
+          PowerCapacityWatts: {Type: number, Select: [{Path: "$.PowerCapacityWatts"}]}
+          PowerSupplyType: {Type: string, Select: [{Path: "$.PowerSupplyType"}]}
+          SerialNumber: {Type: string, Select: [{Path: "$.SerialNumber"}]}
+          SparePartNumber: {Type: string, Select: [{Path: "$.SparePartNumber"}]}
+          LastPowerOutputWatts: {Type: number, Select: [{Path: "$.LastPowerOutputWatts"}]}
+          LineInputVoltage: {Type: number, Select: [{Path: "$.LineInputVoltage"}]}
+          LineInputVoltageType: {Type: string, Select: [{Path: "$.LineInputVoltageType"}]}
+          Manufacturer: {Type: string, Select: [{Path: "$.Manufacturer"}]}
+          Status: {Type: status, Select: [{Path: "$.Status"}]}
+      PowerControl:
+        Records: {Resource: Power.PowerControl, Select: members}
+        Identity: {Select: [{Path: "$.MemberId"}]}
+        Fields:
+          PowerCapacityWatts: {Type: number, Select: [{Path: "$.PowerCapacityWatts"}]}
+          PowerConsumedWatts: {Type: number, Select: [{Path: "$.PowerConsumedWatts"}]}
+          PowerMetrics: {Type: object, Select: [{Path: "$.PowerMetrics"}]}
+
+  Thermal:
+    Records: {Resource: Thermal, Select: object}
+    Identity: {Select: [{Path: "$.Id"}]}
+    Fields:
+      Name: {Type: string, Select: [{Path: "$.Name"}]}
+    Children:
+      Fans:
+        Records: {Resource: Thermal.Fans, Select: members}
+        Identity: {Select: [{Path: "$.MemberId"}]}
+        Fields:
+          Name: {Type: string, Select: [{Path: "$.Name"}]}
+          Reading: {Type: number, Select: [{Path: "$.Reading"}]}
+          ReadingUnits: {Type: string, Select: [{Path: "$.ReadingUnits"}]}
+          Status: {Type: status, Select: [{Path: "$.Status"}]}
+      Temperatures:
+        Records: {Resource: Thermal.Temperatures, Select: members}
+        Identity: {Select: [{Path: "$.MemberId"}]}
+        Fields:
+          Name: {Type: string, Select: [{Path: "$.Name"}]}
+          PhysicalContext: {Type: string, Select: [{Path: "$.PhysicalContext"}]}
+          ReadingCelsius: {Type: number, Select: [{Path: "$.ReadingCelsius"}]}
+          SensorNumber: {Type: number, Select: [{Path: "$.SensorNumber"}]}
+          Status: {Type: status, Select: [{Path: "$.Status"}]}
+          UpperThresholdCritical: {Type: number, Select: [{Path: "$.UpperThresholdCritical"}]}
+          UpperThresholdFatal: {Type: number, Select: [{Path: "$.UpperThresholdFatal"}]}

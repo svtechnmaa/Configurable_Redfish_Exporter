@@ -23,18 +23,29 @@ setup(
         'Programming Language :: Python',
         'Topic :: Internet :: WWW/HTTP',
     ],
+    # `setup.py`'s install_requires — not `requirements.txt` — is what
+    # actually resolves dependencies for both the Docker build (`setup.py
+    # sdist` + `pip install <tarball>`) and the shared test environment
+    # (`pip install --editable .`); `requirements.txt` has no consumer in
+    # this repository. Every entry below is therefore exact-pinned to the
+    # version actually verified working in this checkout (full local
+    # unit/in-process-HTTP suite passing), closing the reproducibility gap
+    # that once let pip resolve an unpinned "aiohttp" down to an ancient,
+    # syntactically-incompatible pre-async/await release.
     install_requires=[
-        "prometheus-client",
-        "pyyaml",
-        "requests",
-        "jsonpath-ng",
-        "Jinja2",
-        "fastapi",
-        "pydantic",
-        "uvicorn",
-        "starlette",
-        "aiohttp",
-        "python-dotenv"
+        "prometheus-client==0.26.0",
+        "pyyaml==6.0.3",
+        # jsonpath-ng's `full_path` parenthesization behavior (relied on by
+        # dataReconstruction.py's paren-stripping) is version-specific —
+        # exact-pinned, not a floor.
+        "jsonpath-ng==1.8.0",
+        "Jinja2==3.1.6",
+        "fastapi==0.141.1",
+        "pydantic==2.13.5",
+        "uvicorn==0.52.4",
+        "starlette==1.6.0",
+        "aiohttp==3.14.3",
+        "python-dotenv==1.2.3"
     ],
     entry_points={
         'console_scripts': [

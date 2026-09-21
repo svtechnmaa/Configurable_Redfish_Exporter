@@ -44,7 +44,10 @@ def dataReconstructor(dataRaw,dataNewSchema, templateDir, serverAddress,logLevel
         result = jsonpathCollector(cleaned_data,idList[key],output='fullpath&value')
         # logging.info("[%s] Id from data raw %s: %s" % (key,result))
         IdPoints.update(result)
-    logging.debug("[%s] Id Points: %s" % (serverAddress,IdPoints))
+    # `research.md` Group 5 (item 5): args passed SEPARATELY (never
+    # pre-formatted via `%`) so `logging` skips the formatting cost
+    # entirely when this level is disabled.
+    logging.debug("[%s] Id Points: %s", serverAddress, IdPoints)
     
     dataTemplate = dict()
 
@@ -72,16 +75,16 @@ def dataReconstructor(dataRaw,dataNewSchema, templateDir, serverAddress,logLevel
         if elementFlag != elements[0]:
             rootElementDataRaw = {elements[0]: cleaned_data[elements[0]]}
             elementFlag = elements[0]
-        logging.debug("[%s] Data raw via element:\n%s" % (serverAddress,rootElementDataRaw))
+        logging.debug("[%s] Data raw via element:\n%s", serverAddress, rootElementDataRaw)
         for elementKey in schemaCurrent:
-            logging.debug("[%s] Current Key: %s" % (serverAddress,elementKey))
+            logging.debug("[%s] Current Key: %s", serverAddress, elementKey)
             if elementKey == 'Id':
                 continue
             if not isinstance(schemaCurrent[elementKey],dict):
                 newJSONPath = re.sub(elements[-1], schemaCurrent[elementKey], abspath)
-                logging.debug("[%s] newJSONPath: %s" % (serverAddress,newJSONPath))
+                logging.debug("[%s] newJSONPath: %s", serverAddress, newJSONPath)
                 result = jsonpathCollector(rootElementDataRaw,newJSONPath)
-                logging.debug("[%s] Result: %s" % (serverAddress,result))
+                logging.debug("[%s] Result: %s", serverAddress, result)
                 if result is not False:
                     if elementKey == 'Status':
                         if isinstance(result[0],dict):
@@ -112,26 +115,25 @@ def dataReconstructor(dataRaw,dataNewSchema, templateDir, serverAddress,logLevel
     fileDir = '/tmp/redfish-data/NewData/'
     fileName = '%s.json' % serverAddress
     dataJSONWriter(newData,fileDir,fileName,serverAddress)
-    logging.info("[%s] Generate data Raw successfully" % serverAddress)
+    logging.info("[%s] Generate data Raw successfully", serverAddress)
     return newData
 
 if __name__ == '__main__':
-    serverAddress='10.97.99.1'
-    username='readonly'
-    password='juniper@123'
-
-    # serverAddress='10.97.12.3'
-    # username='readonly'
-    # password='juniper@123'
-
-    # serverAddress='10.97.12.2'
-    # username='readonly'
-    # password='juniper@123'
+    # No hardcoded credentials (research.md §12 / compatibility-baseline.md
+    # §5b): manual runs must supply these via environment variables.
+    import os
+    serverAddress = os.environ.get('REDFISH_MANUAL_SERVER_ADDRESS')
+    username = os.environ.get('REDFISH_MANUAL_USERNAME')
+    password = os.environ.get('REDFISH_MANUAL_PASSWORD')
+    if not serverAddress or not username or not password:
+        raise SystemExit(
+            'Set REDFISH_MANUAL_SERVER_ADDRESS, REDFISH_MANUAL_USERNAME, and '
+            'REDFISH_MANUAL_PASSWORD to run this module directly.'
+        )
 
     logLevel='info'
     templateDir='./templates/'
 
-    # main(serverAddress,username,password,templateDir,logLevel)
     dataRaw,dataNewSchema,modelSchemaDir = asyncio.run(dataCollector(serverAddress,username,password,templateDir,logLevel=logLevel))
     # logging.info(dataRaw)
 

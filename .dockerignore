@@ -1,0 +1,19 @@
+# Send only the files consumed by the current Dockerfile. This keeps Git
+# history, test environments, evidence, local debug output, and credentials out
+# of the Docker daemon/build cache.
+**
+!Dockerfile
+!MANIFEST.in
+!setup.py
+!src/
+!src/**
+
+# Source-tree files that must never enter the build context.
+src/**/__pycache__/
+src/**/*.py[cod]
+src/redfish_collector/.env
+
+# Package only the inert shipped example. Operators provide real deployment
+# profiles at runtime through the read-only configs volume.
+src/redfish_collector/core/templates/configs/*
+!src/redfish_collector/core/templates/configs/sample.yml

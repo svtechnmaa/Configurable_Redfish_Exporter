@@ -1,15 +1,20 @@
 import yaml
 import json
 import logging
+import time
+import uuid
+from functools import lru_cache
 from re import findall
 # import os
 from os import path,makedirs
 from jinja2 import Template
-from jsonpath_ng.ext import parse 
+from jsonpath_ng.ext import parse
 # import aiohttp
 import asyncio
 from asyncio.exceptions import TimeoutError
 from aiohttp import ClientConnectorError, ClientResponseError, ClientTimeout, ClientSession, TCPConnector
+
+from .batching import DEFAULT_BATCH_SIZE, bounded_gather
 
 # Global cap on simultaneous Redfish requests per scrape. A single shared
 # semaphore + shared connection pool (see dataCollector) is what actually bounds
@@ -35,8 +40,22 @@ def readYAMLTemplate(templateFile, serverAddress):
         logging.error("[%s] Can not find: %s" % (serverAddress,templateFile))
         return
 
+@lru_cache(maxsize=None)
+def _parse_jsonpath_cached(expression: str):
+    # `research.md` Group 5: the legacy (permanent v1-compatibility) crawl/
+    # reconstruction path recompiled every JSONPath expression from scratch
+    # on every single call — `jsonpath_ng.ext.parse()` rebuilds a PLY
+    # lexer/parser each time, a real measured per-call cost (see
+    # `tests/unit/test_startup_performance.py`). Every expression this
+    # legacy path ever compiles comes from a small, fixed set of schema-
+    # declared strings (never request-derived), so caching by the
+    # expression text itself is safe and unbounded growth is not a
+    # concern in practice.
+    return parse(expression)
+
+
 def jsonpathCollector(content,expression,output='value'):
-    jsonpath_expr = parse(str(expression))
+    jsonpath_expr = _parse_jsonpath_cached(str(expression))
     if output == 'fullpath&value':
         result = {str(match.full_path): match.value for match in jsonpath_expr.find(content)}
     else:
@@ -67,53 +86,225 @@ def dataJSONWriter(dataRaw,fileDir,fileName, serverAddress):
         logging.error("[%s] There dataJSONWriter error with %s" % (serverAddress,e))
         json.dump([],file)
     return
-async def fetch(url, token, session, serverAddress, semaphore: asyncio.Semaphore):
+async def fetch(url, token, session, serverAddress, semaphore: asyncio.Semaphore,
+                 *, dispatcher=None, cycle_id=None, priority="fast", request_id=None,
+                 max_response_bytes=None, max_attempts=None, backoff_base_seconds=None,
+                 backoff_cap_seconds=None, deadline=None, byte_budget=None, timeout_seconds=None,
+                 max_redirects=None, follow_redirects=None):
+    """Unchanged legacy behavior when called with only the original 5
+    positional arguments (every existing caller: the monolithic
+    `dataCollector` path and the permanent v1 bridge in `schema/legacy.py`).
+
+    When `dispatcher` is provided (T042's lane facade / the redesigned
+    refresh-cycle path), this acquires the LOCAL semaphore first and then a
+    lease on the shared canonical-IP `PriorityRequestDispatcher` — exactly
+    the acquisition order `research.md` §1 requires ("every fetch acquires
+    [the local semaphore] before the shared dispatcher and releases in
+    reverse order") — and delegates the actual bounded/retried/size-checked
+    request to `targets.request_execution.bounded_fetch`
+    (`research.md` §4 batching, §13 retry/deadline/size-bound contract).
+
+    `research.md` Group 2 (item 6): every production request-handling path
+    (`cycle_callbacks.py`'s v2 GET path, `schema/legacy.py`'s permanent v1
+    bridge) always supplies `dispatcher`. Omitting it — explicitly isolated
+    below in `_fetch_via_direct_session_debug_only`, named so it cannot be
+    reached by accident — is reachable ONLY from the frozen, debug-only
+    `dataCollector()` monolithic `__main__` entrypoint and this repo's own
+    regression tests for that legacy behavior; no future routing change
+    should ever call it by simply forgetting to pass `dispatcher=`."""
+    if dispatcher is None:
+        return await _fetch_via_direct_session_debug_only(
+            url, token, session, serverAddress, semaphore,
+        )
+
+    # --- Redesigned path: local semaphore -> shared dispatcher lease -> bounded_fetch ---
+    from .targets.request_execution import bounded_fetch
+    from .security.containment import canonicalize_address
+
+    async with semaphore:
+        return await bounded_fetch(
+            session, url,
+            canonical_host=canonicalize_address(serverAddress),
+            dispatcher=dispatcher, priority=priority, cycle_id=cycle_id,
+            # Never default to the URL: two concurrent fetches of the same
+            # URL within one cycle would otherwise collide on one dispatcher
+            # admission-tracking key (see cycle_callbacks.py's `fetch()`,
+            # the actual caller, which always passes its own unique ID).
+            request_id=request_id or str(uuid.uuid4()),
+            # `research.md` Group 2 (item 1): the ONE shared, process-wide
+            # budget (`Tuning.IO.MaxInFlightResponseBytes`), threaded down
+            # from `cycle_callbacks.py`'s `context.io_byte_budget` (v2 GET)
+            # or `schema/legacy.py`'s `collect_legacy_lane` (permanent v1
+            # bridge) — `_module_byte_budget()` below remains only as a
+            # back-compat fallback for a caller that genuinely supplies
+            # none, never a second production budget.
+            byte_budget=byte_budget if byte_budget is not None else _module_byte_budget(),
+            max_response_bytes=max_response_bytes or 10485760,
+            max_attempts=max_attempts or 5,
+            # `research.md` Group 2 (item 3): the configured
+            # `Tuning.Request.TimeoutSeconds` — never a hard-coded 30s.
+            timeout_seconds=timeout_seconds if timeout_seconds is not None else 30,
+            backoff_base_seconds=backoff_base_seconds or 0.5,
+            backoff_cap_seconds=backoff_cap_seconds or 30,
+            deadline=deadline if deadline is not None else (time.monotonic() + 30),
+            headers={'X-Auth-Token': token} if token else None,
+            # `Safety.FollowRedirects` from the schema — never silently
+            # fall back to this function's own default of "enabled, 3 hops"
+            # for a caller that supplies an explicit configured value.
+            max_redirects=max_redirects if max_redirects is not None else 3,
+            follow_redirects=follow_redirects if follow_redirects is not None else True,
+        )
+
+
+# `research.md` Group 2 (item 6) / round-of-repair: this legacy debug-only
+# fallback previously buffered `response.json()` with no size bound at
+# all — a hostile/misbehaving BMC's response could exhaust process memory.
+# Matches `same_target.py`'s own default cap for every other transport path.
+_DEBUG_ONLY_MAX_BODY_BYTES = 10485760
+
+
+async def _fetch_via_direct_session_debug_only(url, token, session, serverAddress, semaphore: asyncio.Semaphore):
+    """`research.md` Group 2 (item 6): the ORIGINAL, unguarded
+    `session.get()` fallback — no dispatcher admission, no shared byte
+    budget. Explicitly isolated into its own distinctly-named function
+    (never inlined into `fetch()` itself) so it can never be reached by a
+    future call site that simply forgets to pass `dispatcher=` — every
+    genuine caller of THIS function must name it explicitly. The only real
+    caller today is `fetch()`'s own `dispatcher is None` branch, itself
+    only exercised by the frozen, debug-only `dataCollector()` monolithic
+    entrypoint and this repo's own regression tests for that legacy
+    behavior.
+
+    Round-of-repair: `allow_redirects` is now explicitly `False` (aiohttp's
+    own default is `True`, which previously resent `X-Auth-Token` to
+    whatever `Location` a compromised/hostile BMC returned — this path has
+    no same-target containment at all, so an unguarded redirect is a real
+    token-exfiltration risk) and the response body is read through the
+    same bounded, streaming reader every other transport path uses,
+    instead of an unbounded `response.json()`."""
+    from .security.same_target import _read_json_body_bounded
+
     headers = {'X-Auth-Token': token}
-    
+
     retries = 5
     backoffFactor = 0.5
-    
+
     for attempt in range(1, retries + 1):
         try:
             async with semaphore:
-                async with session.get(url, headers=headers, ssl=False) as response:
+                async with session.get(url, headers=headers, ssl=False, allow_redirects=False) as response:
                     response.raise_for_status()
-                    return await response.json()
+                    return await _read_json_body_bounded(response, _DEBUG_ONLY_MAX_BODY_BYTES, allow_empty_body=False)
         except ClientResponseError as e:
             # 4xx (except 429) is permanent for this request: retrying just wastes
             # load on an already-weak BMC and will never succeed. Fail fast.
             if e.status < 500 and e.status != 429:
-                logging.error("[%s] Non-retryable HTTP %s for url %s: %s", serverAddress, e.status, url, e)
-                return {"status": e.status, "data": None, "success": False, "error_message": f"HTTP {e.status} for URL {url}"}
+                # `research.md` Group 1 (item 5): never log raw exception
+                # text or a discovered/rejected link value in this legacy
+                # crawl path — only the allow-listed HTTP status and the
+                # exception's own class name.
+                logging.error(
+                    "[%s] Non-retryable HTTP status (event=fetch_failed, status=%s, error=%s)",
+                    serverAddress, e.status, type(e).__name__,
+                )
+                # Never embed the raw URL or exception text — status/class
+                # name only, matching the logged event above.
+                return {"status": e.status, "data": None, "success": False, "error_message": f"HTTP {e.status}"}
             transientError = e
         except (ClientConnectorError, TimeoutError, OSError) as e:
             transientError = e
         except Exception as e:
-            logging.error("[%s] Unexpected error during fetch: %s", serverAddress, e)
-            return {"status": 500, "data": None, "success": False, "error_message": f"Unexpected error: {e} for URL {url}"}
+            logging.error(
+                "[%s] Unexpected error during fetch (event=fetch_failed, error=%s)",
+                serverAddress, type(e).__name__,
+            )
+            return {"status": 500, "data": None, "success": False, "error_message": f"Unexpected error: {type(e).__name__}"}
 
         # transient failure (timeout / connection / 5xx / 429): back off and retry
-        logging.debug("[%s] Attempt %s with url: %s failed: %s", serverAddress, attempt, url, transientError)
+        logging.debug(
+            "[%s] Attempt %s failed (event=fetch_retry, error=%s)",
+            serverAddress, attempt, type(transientError).__name__,
+        )
         if attempt == retries:
             logging.error("[%s] Max retries reached. Giving up.", serverAddress)
             statusCode = getattr(transientError, 'status', None) or getattr(transientError, 'code', 500)
-            return {"status": statusCode, "data": None, "success": False, "error_message": f"Request Error: {transientError} for URL {url}"}
+            return {
+                "status": statusCode, "data": None, "success": False,
+                "error_message": f"Request Error: {type(transientError).__name__}",
+            }
         delay = backoffFactor * (2 ** (attempt - 1))
         logging.debug("[%s] Retrying in %.2f seconds...", serverAddress, delay)
         await asyncio.sleep(delay)
+    return
 
-async def fetch_all(urls: list, token, serverAddress, session, semaphore):
+
+_BYTE_BUDGET = None
+
+
+def _module_byte_budget():
+    """Back-compat/test-only fallback for a caller that supplies no
+    `byte_budget` at all — every real production caller (`cycle_callbacks.py`,
+    `schema/legacy.py`'s `collect_legacy_lane`) always threads through the
+    ONE process-wide `TargetRegistry.io_byte_budget`
+    (`Tuning.IO.MaxInFlightResponseBytes`) instead of reaching this."""
+    global _BYTE_BUDGET
+    if _BYTE_BUDGET is None:
+        from .targets.request_execution import InFlightByteBudget
+        _BYTE_BUDGET = InFlightByteBudget(capacity_bytes=67108864)
+    return _BYTE_BUDGET
+
+
+async def fetch_all(
+    urls: list, token, serverAddress, session, semaphore, *, dispatcher=None, cycle_id=None, priority="fast",
+    deadline=None, byte_budget=None, timeout_seconds=None, batch_size=None,
+    max_redirects=None, follow_redirects=None,
+):
     # session + semaphore are owned by dataCollector and shared across the whole
     # scrape, so concurrency is globally bounded instead of per-call.
     try:
-        tasks = [fetch(url, token, session, serverAddress, semaphore) for url in urls]
-        results = await asyncio.gather(*tasks)
+        tasks = [
+            fetch(url, token, session, serverAddress, semaphore,
+                  dispatcher=dispatcher, cycle_id=cycle_id, priority=priority, deadline=deadline,
+                  byte_budget=byte_budget, timeout_seconds=timeout_seconds,
+                  max_redirects=max_redirects, follow_redirects=follow_redirects)
+            for url in urls
+        ]
+        # `research.md` Group 5 (item 2): a list-sized `asyncio.gather`
+        # fires every URL in this batch onto the event loop/dispatcher at
+        # once — for a large discovered link list, that bursts past the
+        # configured per-BMC concurrency `Tuning.Crawl.BatchSize` exists to
+        # bound. `batch_size=None` falls back to `bounded_gather`'s own
+        # sane default (never a genuinely unbounded single gather).
+        results = await bounded_gather(tasks, batch_size=batch_size or DEFAULT_BATCH_SIZE)
         return results
     except Exception as e:
-        logging.error("[%s] Fetch all URL error: %s", serverAddress, e)
+        # `research.md` Group 1 (item 5): a same-target/redirect containment
+        # violation (`SameTargetViolation`) embeds the rejected link/
+        # redirect value directly in its own exception message — this
+        # legacy `fetch_all` path (used by the permanent v1-compatibility
+        # bridge) must never log that raw text, only the allow-listed event
+        # name and the exception's own class name.
+        logging.error("[%s] fetch_all failed (event=fetch_all_failed, error=%s)", serverAddress, type(e).__name__)
         raise
 
-async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLevel,session,semaphore):
+async def rawDataCollector(
+    serverAddress,schemaContent,keyDict: dict,token,logLevel,session,semaphore,
+    *, dispatcher=None, cycle_id=None, priority="fast", deadline=None, byte_budget=None, timeout_seconds=None,
+    batch_size=None, max_redirects=None, follow_redirects=None,
+):
+    """`dispatcher`/`cycle_id`/`priority`/`deadline`/`byte_budget`/
+    `timeout_seconds` (all keyword-only, default `None`/unset) are threaded
+    through to every `fetch_all()` call and every recursive self-call —
+    when supplied (the permanent v1-
+    compatibility bridge, `schema/legacy.py`'s `collect_legacy_lane`, always
+    supplies them), this crawl uses the SAME dispatcher-integrated,
+    same-target-validated, size-bounded `bounded_fetch` engine the
+    redesigned v2 path uses, instead of `fetch()`'s own unguarded
+    `session.get()` fallback (`research.md` Group 2: "Remove direct legacy
+    `session.get()`"). Omitting them (every OTHER existing caller — the
+    frozen, debug-only `dataCollector()` monolithic entrypoint, and this
+    file's own `__main__` block) preserves the exact original behavior, per
+    this function's long-standing contract."""
     # Logging is configured once at process start (uvicorn logging.yml / __main__);
     # don't call logging.basicConfig() per request — it's a no-op after the first
     # call anyway and mutates global logging state from inside the hot path.
@@ -124,19 +315,24 @@ async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLe
     # the bootstrap crawl to the model-component crawls. The concurrency race is
     # instead solved by giving each gathered top-level component its OWN copy at
     # the call site in dataCollector (P0-2) — see `dict(keyIDDict)` there.
-    logging.debug("[%s] Key schemaContent: %s" % (serverAddress,schemaContent))
-    logging.debug("[%s] Key ID Dict: %s" % (serverAddress,keyDict))
+    # `research.md` Group 5 (item 5): passing the format string and args
+    # SEPARATELY (never pre-formatted via `%`/f-string) lets `logging`
+    # skip the actual formatting work entirely when this level is
+    # disabled — a `% (...)`-eager call always pays that cost regardless
+    # of whether DEBUG is even enabled.
+    logging.debug("[%s] Key schemaContent: %s", serverAddress, schemaContent)
+    logging.debug("[%s] Key ID Dict: %s", serverAddress, keyDict)
     if isinstance(schemaContent,dict):
         if '$inituri' in schemaContent:
             # dynamicValue = bool(re.search(r"\{\{\s*[\w]+\s*\}\}", schemaContent['$inituri']))
             dynamicValueList = [match.strip() for match in findall(r"\{\{(.*?)\}\}", schemaContent['$inituri'])]
-            logging.debug("[%s] Dynamic Value List from Schema: %s" % (serverAddress,dynamicValueList))
+            logging.debug("[%s] Dynamic Value List from Schema: %s", serverAddress, dynamicValueList)
             if dynamicValueList == []:
                 uri = schemaContent['$inituri']
             else:
                 for dynamicValue in dynamicValueList:
                     if dynamicValue not in keyDict:
-                        logging.error("[%s] Can't see dynamic value: %s" % (serverAddress,dynamicValue))
+                        logging.error("[%s] Can't see dynamic value: %s", serverAddress, dynamicValue)
                         return []
                 uri = Template(schemaContent['$inituri']).render(keyDict)
         else:
@@ -144,41 +340,71 @@ async def rawDataCollector(serverAddress,schemaContent,keyDict: dict,token,logLe
             return []
 
         url = "https://%s%s" % (serverAddress,uri)
-        logging.debug("[%s] Father URL: %s" % (serverAddress,url))
+        logging.debug("[%s] Father URL: %s", serverAddress, url)
         # dataRaw = dict()
         if '$jsonpath' in schemaContent:
-            tempRaw = (await fetch_all([url],token,serverAddress,session,semaphore))[0]
+            tempRaw = (await fetch_all(
+                [url],token,serverAddress,session,semaphore,
+                dispatcher=dispatcher,cycle_id=cycle_id,priority=priority,deadline=deadline,
+                byte_budget=byte_budget,timeout_seconds=timeout_seconds,batch_size=batch_size,
+                max_redirects=max_redirects,follow_redirects=follow_redirects,
+            ))[0]
             # dataRaw =dataRaw[0]
             childURIList = jsonpathCollector(tempRaw,str(schemaContent['$jsonpath']))
             # logging.info(childURIList)
             if childURIList is False:
-                logging.warning("[%s] Child URI List isn't existed with %s" % (serverAddress, schemaContent))
-                logging.debug("[%s] childURIList:\n%s" % (serverAddress,tempRaw))
+                logging.warning("[%s] Child URI List isn't existed with %s", serverAddress, schemaContent)
+                logging.debug("[%s] childURIList:\n%s", serverAddress, tempRaw)
                 return
             else:
                 childURLList = ["https://%s%s" % (serverAddress,path) for path in childURIList]
-            dataRawList = await fetch_all(childURLList,token,serverAddress,session,semaphore)
+            dataRawList = await fetch_all(
+                childURLList,token,serverAddress,session,semaphore,
+                dispatcher=dispatcher,cycle_id=cycle_id,priority=priority,deadline=deadline,
+                byte_budget=byte_budget,timeout_seconds=timeout_seconds,batch_size=batch_size,
+                max_redirects=max_redirects,follow_redirects=follow_redirects,
+            )
             if dataRawList is None:
-                logging.error("[%s] Get data failed" % serverAddress)
+                logging.error("[%s] Get data failed", serverAddress)
                 return dataRawList
             for key in schemaContent:
                 if isinstance(schemaContent[key],dict):
-                    logging.debug("[%s] Found child component: %s" % (serverAddress,key))
+                    logging.debug("[%s] Found child component: %s", serverAddress, key)
                     count = 0
                     for childURL, _ in zip(childURLList,dataRawList):
                         childKey = getKeyDictFromURLPath(childURL, schemaContent)
                         updatedKeyDict = keyDict | childKey
-                        logging.debug("[%s] Updated key: %s" % (serverAddress,updatedKeyDict))
+                        logging.debug("[%s] Updated key: %s", serverAddress, updatedKeyDict)
                         # keyDict.update(getKeyDictFromURLPath(childURL, schemaContent))
                         try:
-                            dataRawList[count][key] = await rawDataCollector(serverAddress,schemaContent[key],updatedKeyDict,token,logLevel,session,semaphore)
+                            dataRawList[count][key] = await rawDataCollector(
+                                serverAddress,schemaContent[key],updatedKeyDict,token,logLevel,session,semaphore,
+                                dispatcher=dispatcher,cycle_id=cycle_id,priority=priority,deadline=deadline,
+                                byte_budget=byte_budget,timeout_seconds=timeout_seconds,batch_size=batch_size,
+                                max_redirects=max_redirects,follow_redirects=follow_redirects,
+                            )
                             count+=1
                         except Exception as e:
-                            logging.error("[%s] There error with %s" % (serverAddress,e))
+                            # `research.md` Group 1 (item 5): this recursive
+                            # crawl's own child-component fetch may propagate
+                            # a `SameTargetViolation` (a rejected discovered
+                            # link/redirect), whose message embeds the
+                            # rejected value itself — never logged raw here,
+                            # only the allow-listed event name and the
+                            # exception's own class name.
+                            logging.error(
+                                "[%s] recursive component crawl failed (event=recursive_crawl_failed, error=%s)"
+                                % (serverAddress, type(e).__name__)
+                            )
             for childURL, _ in zip(childURLList,dataRawList):
                 keyDict.update(getKeyDictFromURLPath(childURL, schemaContent))
         else:
-            dataRawList = await fetch_all([url],token,serverAddress,session,semaphore)
+            dataRawList = await fetch_all(
+                [url],token,serverAddress,session,semaphore,
+                dispatcher=dispatcher,cycle_id=cycle_id,priority=priority,deadline=deadline,
+                byte_budget=byte_budget,timeout_seconds=timeout_seconds,batch_size=batch_size,
+                max_redirects=max_redirects,follow_redirects=follow_redirects,
+            )
             keyDict.update(getKeyDictFromURLPath(url, schemaContent))
             return dataRawList
         return dataRawList
@@ -215,13 +441,22 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
             if "$tokenuri" in commonSchema['Metadata'][basePoint]:
                 tokenURL = "https://%s%s" % (serverAddress,commonSchema['Metadata'][basePoint]['$tokenuri'])
                 payload = {"UserName": username,"Password": password}
-                logging.debug("[%s] token URL %s and Payload: %s" % (serverAddress,tokenURL,payload))
+                # Never log the payload verbatim: it carries the plaintext
+                # password. Only the (non-secret) token URL is logged.
+                logging.debug("[%s] token URL %s" % (serverAddress,tokenURL))
                 for attempt in range(1, 4):
                     try:
-                        async with session.post(tokenURL,json=payload, ssl=False, timeout=ClientTimeout(total=60)) as response:
+                        async with session.post(tokenURL,json=payload, ssl=False, allow_redirects=False, timeout=ClientTimeout(total=60)) as response:
                             response.raise_for_status()
                             tokenData = response.headers
-                            logging.debug("[%s] Token Data: %s" % (serverAddress,tokenData))
+                            # Never log response headers verbatim: they
+                            # carry the live X-Auth-Token. Only the
+                            # non-secret presence/absence of expected
+                            # headers is logged.
+                            logging.debug(
+                                "[%s] Token response received (has X-Auth-Token: %s, has Location: %s)"
+                                % (serverAddress, 'X-Auth-Token' in tokenData, 'Location' in tokenData)
+                            )
                             if 'X-Auth-Token' in tokenData:
                                 tokenValue = tokenData['X-Auth-Token']
                                 # Some Redfish BMCs omit (or oddly format) the
@@ -243,12 +478,16 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
                     except ClientResponseError as e:
                         # 401/403/404 etc. = wrong creds / wrong token URI. Retrying
                         # 3× won't help and only loads the BMC — abort immediately.
+                        # Never log raw exception text (`e`) — an aiohttp
+                        # exception's own `str()` can embed the request URL,
+                        # which may carry a query string; status/class name
+                        # only, matching every other transport path.
                         if e.status < 500 and e.status != 429:
-                            logging.error("[%s] Auth failed (HTTP %s), not retrying: %s" % (serverAddress, e.status, e))
+                            logging.error("[%s] Auth failed (HTTP %s), not retrying: %s" % (serverAddress, e.status, type(e).__name__))
                             return
-                        logging.error("[%s] Transient error when getting token: %s" % (serverAddress,e))
+                        logging.error("[%s] Transient error when getting token: %s" % (serverAddress, type(e).__name__))
                     except (ClientConnectorError, TimeoutError) as e:
-                        logging.error("[%s] There is error when getting token: %s" % (serverAddress,e))
+                        logging.error("[%s] There is error when getting token: %s" % (serverAddress, type(e).__name__))
 
                     if attempt < 3:
                         logging.debug("[%s] Retrying to get token (Attempt %d)" % (serverAddress, attempt + 1))
@@ -327,13 +566,15 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
         # Location header leaves logoutURL=None (see token acquisition above).
         if logoutURL:
             try:
-                async with session.delete(logoutURL, headers={'X-Auth-Token': tokenValue}, ssl=False, timeout=ClientTimeout(total=60)) as response:
+                async with session.delete(logoutURL, headers={'X-Auth-Token': tokenValue}, ssl=False, allow_redirects=False, timeout=ClientTimeout(total=60)) as response:
                     if response.status == 200 or response.status == 204:
                         logging.info("[%s] Logged out successfully" % serverAddress)
                     else:
                         logging.error("[%s] Logout failed with status code: %s" % (serverAddress,response.status))
             except Exception as e:
-                logging.error("[%s] There is error when logout: %s" % (serverAddress,e))
+                # Never log raw exception text — see the token-acquisition
+                # handlers above for why.
+                logging.error("[%s] There is error when logout: %s" % (serverAddress, type(e).__name__))
                 return
         else:
             logging.warning("[%s] No logout URL (Location missing); skipping logout" % serverAddress)
@@ -348,17 +589,17 @@ async def dataCollector(serverAddress,username,password,templateDir,logLevel):
     return dataRaw,dataNewSchema,modelSchemaDir
 
 if __name__ == '__main__':
-    serverAddress='10.97.99.1'
-    username='readonly'
-    password='juniper@123'
-
-    # serverAddress='10.97.12.3'
-    # username='readonly'
-    # password='juniper@123'
-
-    serverAddress='10.97.12.2'
-    username='readonly'
-    password='juniper@123'
+    # No hardcoded credentials (research.md §12 / compatibility-baseline.md
+    # §5b): manual runs must supply these via environment variables.
+    import os
+    serverAddress = os.environ.get('REDFISH_MANUAL_SERVER_ADDRESS')
+    username = os.environ.get('REDFISH_MANUAL_USERNAME')
+    password = os.environ.get('REDFISH_MANUAL_PASSWORD')
+    if not serverAddress or not username or not password:
+        raise SystemExit(
+            'Set REDFISH_MANUAL_SERVER_ADDRESS, REDFISH_MANUAL_USERNAME, and '
+            'REDFISH_MANUAL_PASSWORD to run this module directly.'
+        )
 
     logLevel='info'
     templateDir='./templates/'

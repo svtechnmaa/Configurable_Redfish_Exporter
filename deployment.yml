@@ -7,14 +7,58 @@ metadata:
     name: exporter
 
 ---
-apiVersion: v1
-data:
-  .dockerconfigjson: eyJhdXR...
-kind: Secret
+# The image-pull Secret referenced below ("github-token") is created
+# externally (e.g. `kubectl create secret docker-registry ...`) — this
+# manifest never inlines registry credentials (Migration & Rollback /
+# "Kubernetes / Multi-Replica Operating Model" in plan.md).
+#
+# The deployment profile ("sample.yml", containing Auth + Tuning + Metrics
+# together, FR-005) is likewise created externally as one complete Secret
+# key, read-only, mode 0400 — never a ConfigMap, never split across two
+# objects:
+#   kubectl create secret generic redfish-exporter-profile \
+#     --from-file=sample.yml=./sample.yml -n exporter
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
 metadata:
-  name: github-token
   namespace: exporter
-type: kubernetes.io/dockerconfigjson
+  name: redfish-exporter-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: redfish-exporter
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        # Restrict to the operator's actual Prometheus namespace/pod
+        # selectors — these example labels MUST be replaced with the
+        # deployment's real Prometheus identity before applying.
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+          podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 9814
+  egress:
+    # Any literal IPv4/IPv6 BMC target is permitted (no CIDR allow-list —
+    # the exporter's own containment layer, not network policy, enforces
+    # same-target discipline per request) but only on TCP/443: this exporter
+    # never needs any other egress port or protocol.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        - ipBlock:
+            cidr: ::/0
+      ports:
+        - protocol: TCP
+          port: 443
 
 ---
 kind: Deployment
@@ -41,17 +85,41 @@ spec:
       - image: ghcr.io/svtechnmaa/redfish-exporter:latest
         name: physical-exporter
         imagePullPolicy: Always
+        # Exactly one Uvicorn worker, passed explicitly (not relying on the
+        # image's CLI default) so a future accidental change to that default
+        # cannot silently alter production concurrency without a manifest
+        # diff also being required.
+        args: ["--workers", "1"]
         ports:
         - containerPort: 9814
           protocol: TCP
           name: red-ex-port
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        readinessProbe:
+          tcpSocket:
+            port: 9814
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          tcpSocket:
+            port: 9814
+          initialDelaySeconds: 15
+          periodSeconds: 20
         volumeMounts:
-        - name: redfish-configs
+        - name: redfish-profile
           mountPath: "/opt/redfish_exporter/templates/configs"
+          readOnly: true
       volumes:
-      - name: redfish-configs
-        configMap:
-          name: redfish-configs
+      - name: redfish-profile
+        secret:
+          secretName: redfish-exporter-profile
+          defaultMode: 0400
           items:
           - key: "sample.yml"
             path: "sample.yml"

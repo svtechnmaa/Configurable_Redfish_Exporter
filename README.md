@@ -20,8 +20,8 @@ You need to define a readonly account on ILO/IDRAC, We will use this account for
   cat sample.yml
 
   Auth:
-  Username: readonly
-  Password: juniper@123
+  Username: CHANGE_ME_USERNAME
+  Password: CHANGE_ME_PASSWORD
   ...
   ```
 Tips: If somecases we don't have an unique account for all ILO/IDRAC, we can define more file with: <name>.yml same with sample.yml that I defined, then we can add other account and use prometheus query with parameter: config: <name>. Check `Pull metrics from Redfish Exporter` or `Query metrics for testing` section
