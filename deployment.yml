@@ -14,8 +14,9 @@ metadata:
 #
 # The deployment profile ("sample.yml", containing Auth + Tuning + Metrics
 # together, FR-005) is likewise created externally as one complete Secret
-# key, read-only, mode 0400 — never a ConfigMap, never split across two
-# objects:
+# key, read-only, mode 0440 (group-readable by the container's fsGroup,
+# since the container now runs as non-root — see securityContext below) —
+# never a ConfigMap, never split across two objects:
 #   kubectl create secret generic redfish-exporter-profile \
 #     --from-file=sample.yml=./sample.yml -n exporter
 
@@ -79,6 +80,13 @@ spec:
       labels:
         app: redfish-exporter
     spec:
+      # fsGroup must match the image's fixed non-root GID (Dockerfile
+      # `addgroup -g 10001`) so the container can read the group-readable
+      # (0440) Secret-mounted profile below without running as root.
+      securityContext:
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       imagePullSecrets:
       - name: github-token
       containers:
@@ -94,6 +102,21 @@ spec:
         - containerPort: 9814
           protocol: TCP
           name: red-ex-port
+        # Hardened container security context (Trivy KSV-0014/KSV-0118).
+        # UID/GID 10001 is the image's actual fixed non-root user (Dockerfile
+        # `USER 10001:10001`), not an arbitrary value. The app only ever
+        # writes under /tmp (app/access logs, opt-in debug artifacts), which
+        # is provided by the separate `tmp` emptyDir below, so the root
+        # filesystem itself can stay fully read-only.
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
         resources:
           requests:
             cpu: 100m
@@ -115,14 +138,21 @@ spec:
         - name: redfish-profile
           mountPath: "/opt/redfish_exporter/templates/configs"
           readOnly: true
+        # Writable scratch space for app/access logs and opt-in debug
+        # artifacts (all under /tmp) now that the root filesystem is
+        # read-only.
+        - name: tmp
+          mountPath: /tmp
       volumes:
       - name: redfish-profile
         secret:
           secretName: redfish-exporter-profile
-          defaultMode: 0400
+          defaultMode: 0440
           items:
           - key: "sample.yml"
             path: "sample.yml"
+      - name: tmp
+        emptyDir: {}
 
 ---
 apiVersion: v1
