@@ -1,12 +1,16 @@
 from setuptools import setup, find_packages, find_namespace_packages
 
-VERSION = "2.2.1"
+# Single source of truth for the package version — both CI.yml and main.yml
+# read it dynamically via `python3 setup.py --version` rather than holding
+# their own copy, so `version=VERSION` below (not a second literal) is what
+# actually prevents this constant from drifting out of sync with itself.
+VERSION = "2.3.0"
 PACKAGE_NAME = "redfish-exporter"
 
 setup(
     name=PACKAGE_NAME,
     description="The Exporter for Physical Server Components Monitoring via RedFish API using FastAPI",
-    version="2.2.1",
+    version=VERSION,
     author="Freezing",
     url="https://github.com/svtechnmaa/Configurable_Redfish_Exporter.git",
     package_dir = {"": "src"},
