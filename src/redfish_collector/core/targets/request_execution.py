@@ -68,9 +68,20 @@ class InFlightByteBudget:
             try:
                 await asyncio.wait_for(future, timeout=remaining)
             except asyncio.TimeoutError as exc:
+                raise DeadlineExceededError("in-flight response byte budget: deadline exceeded while waiting") from exc
+            finally:
+                # `except TimeoutError` alone only removes the waiter on a
+                # genuine deadline expiry. If the calling task is instead
+                # cancelled while awaiting `future` (asyncio.CancelledError,
+                # not TimeoutError), that used to skip cleanup entirely and
+                # leak this future in `_waiters` — a `release()` call still
+                # sweeps it eventually, but nothing guarantees one happens
+                # promptly while the budget stays saturated. `finally`
+                # covers every exit (success, timeout, cancellation) and
+                # cancellation itself is deliberately left to propagate
+                # unchanged, never translated into `DeadlineExceededError`.
                 if future in self._waiters:
                     self._waiters.remove(future)
-                raise DeadlineExceededError("in-flight response byte budget: deadline exceeded while waiting") from exc
 
     def release(self, size_bytes: int) -> None:
         self._in_use = max(0, self._in_use - size_bytes)
