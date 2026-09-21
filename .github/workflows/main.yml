@@ -39,11 +39,19 @@ jobs:
     # `test:` job below was entirely commented out ("THIS REPO HASN'T HAS
     # /tests YET"), which is no longer true, and the `run_test`
     # `workflow_dispatch` input was declared but never consumed anywhere.
-    # Runs for every trigger (`push`, `pull_request`, and
-    # `workflow_dispatch`) UNLESS a manual dispatch explicitly opts out via
-    # `run_test: false` — push/pull_request events, which have no
-    # `inputs.run_test`, always run it.
-    if: inputs.run_test != false
+    #
+    # Security fix: `inputs.run_test != false` was NOT the "always true for
+    # push/pull_request" condition the previous comment here claimed.
+    # `inputs` doesn't exist for push/pull_request, so `inputs.run_test`
+    # resolves to `null` — and GitHub Actions' comparison rules cast BOTH
+    # `null` and `false` to `0` before comparing, so `null != false` is
+    # itself `false`. That silently SKIPPED this job on every push and PR,
+    # and `build` below treated a skipped test as good enough to proceed,
+    # meaning a main-branch image could publish with zero tests run.
+    # `github.event_name != 'workflow_dispatch'` short-circuits the whole
+    # expression to `true` for push/pull_request regardless of `inputs`, so
+    # the opt-out only ever applies to an actual `workflow_dispatch` run.
+    if: github.event_name != 'workflow_dispatch' || inputs.run_test != false
     runs-on: ubuntu-dind
     permissions:
       contents: read
@@ -73,11 +81,25 @@ jobs:
     # is skipped (not merely failed) — `always()` combined with the
     # explicit success/skip check below keeps `build` running for its
     # non-publishing (build-only) work even when `test` was intentionally
-    # skipped via `run_test: false`, while still hard-failing if `test`
-    # actually ran and failed.
+    # skipped via `workflow_dispatch`'s `run_test: false`, while still
+    # hard-failing if `test` actually ran and failed.
+    #
+    # Security fix: a bare "success or skipped" allowance is exactly what
+    # let a `push` publish an image with no test run at all once the
+    # `test` job's own condition was (incorrectly) skipping it. `test` is
+    # now unconditional for `push` (see its `if:` above), so
+    # `needs.test.result` can never legitimately be `skipped` for a
+    # `push` — this makes that explicit and independent of the `test`
+    # job's condition staying correct, rather than relying on it
+    # transitively: a `push` requires a genuine `success`; only a
+    # non-push run (pull_request or an opted-out workflow_dispatch) may
+    # still proceed on `skipped`.
     if: |
       always() &&
-      (needs.test.result == 'success' || needs.test.result == 'skipped')
+      (
+        (github.event_name == 'push' && needs.test.result == 'success') ||
+        (github.event_name != 'push' && (needs.test.result == 'success' || needs.test.result == 'skipped'))
+      )
     runs-on: ubuntu-dind
     permissions:
       contents: read
@@ -248,8 +270,16 @@ jobs:
       # on a genuine `push` to `main` — never for `pull_request` (see the
       # login/build steps above) and never for a `workflow_dispatch` of an
       # arbitrary `commit_id` (which is not necessarily `main`'s tip).
+      #
+      # Security fix: `needs.test.result == 'success'` is checked again
+      # here, redundantly with the job-level `if:` above — this step is
+      # the one place that actually mutates the mutable `latest`/version
+      # tags, so it does not rely transitively on `build`'s own gate
+      # staying correct; it independently refuses to publish without a
+      # genuinely successful test run for this push.
       if: |
         github.event_name == 'push' &&
+        needs.test.result == 'success' &&
         steps.check_commit_message.outputs.no_ci != 'true'
       run: |
         docker tag ${{ env.IMAGE_NAME }}:latest ghcr.io/${{ env.REPO }}:${{ env.IMAGE_TEST_TAG }}
