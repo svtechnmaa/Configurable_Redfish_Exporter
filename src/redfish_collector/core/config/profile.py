@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, get_type_hints
 
 import yaml
 
@@ -246,6 +246,18 @@ _SECTIONS: dict[str, tuple[str, type, dict[str, tuple[str, tuple[float, float]]]
 _KNOWN_TOP_LEVEL_TUNING_KEYS = set(_TOP_LEVEL_RANGES) | set(_SECTIONS)
 _TOP_LEVEL_PROFILE_KEYS = {"Auth", "Tuning", "Metrics"}
 
+# The dataclass field annotations above are the one declared source of
+# truth for each ranged key's expected numeric type (`int` vs `float`) —
+# resolved once here via `get_type_hints` (not `field.type`, which would
+# just be the unevaluated annotation string under `from __future__ import
+# annotations`) so `_validate_numeric` can actually enforce it below,
+# instead of a value merely being numeric-and-in-range regardless of type.
+_TOP_LEVEL_FIELD_TYPES: dict[str, type] = get_type_hints(Tuning)
+_SECTION_FIELD_TYPES: dict[str, dict[str, type]] = {
+    yaml_section: get_type_hints(dataclass_type)
+    for yaml_section, (_, dataclass_type, _) in _SECTIONS.items()
+}
+
 # Process-wide keys that must be identical across every profile in one
 # deployment (dotted path using the YAML section/key names for readable errors).
 _PROCESS_WIDE_KEYS: list[tuple[str, ...]] = [
@@ -288,14 +300,33 @@ def _get_nested(data: dict[str, Any], path: tuple[str, ...]) -> Any:
 _MISSING = object()
 
 
-def _check_range(name: str, value: Any, bounds: tuple[float, float] | None) -> None:
+def _validate_numeric(
+    name: str, value: Any, bounds: tuple[float, float] | None, expected_type: type | None
+) -> Any:
+    """Validate `value` against `bounds` AND `expected_type`, returning the
+    value to actually store (coerced to `int` when a whole-number float was
+    given for an integer field). A float that is merely numeric-and-in-range
+    is not enough for an integer-only setting: e.g. `Tuning.Crawl.BatchSize:
+    8.5` previously passed this check (8.5 is numeric and within [1, 64])
+    and was stored as-is, only to blow up `range(0, n, 8.5)` in
+    `batching.bounded_gather` during request processing, not at startup.
+    """
     if bounds is None:
-        return
+        return value
     low, high = bounds
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ProfileValidationError(f"Tuning.{name} must be numeric, got {type(value).__name__}")
+    if expected_type is int and isinstance(value, float):
+        if not value.is_integer():
+            raise ProfileValidationError(
+                f"Tuning.{name} must be an integer, got fractional float {value!r}"
+            )
+        value = int(value)
+    elif expected_type is float and isinstance(value, int):
+        value = float(value)
     if not (low <= value <= high):
         raise ProfileValidationError(f"Tuning.{name} = {value} is out of range [{low}, {high}]")
+    return value
 
 
 def _build_tuning(raw_tuning: dict[str, Any]) -> Tuning:
@@ -310,8 +341,8 @@ def _build_tuning(raw_tuning: dict[str, Any]) -> Tuning:
     for yaml_key, (attr, bounds) in _TOP_LEVEL_RANGES.items():
         if yaml_key in raw_tuning:
             value = raw_tuning[yaml_key]
-            _check_range(yaml_key, value, bounds)
-            top_kwargs[attr] = value
+            expected_type = _TOP_LEVEL_FIELD_TYPES.get(attr)
+            top_kwargs[attr] = _validate_numeric(yaml_key, value, bounds, expected_type)
 
     for yaml_section, (attr, dataclass_type, key_map) in _SECTIONS.items():
         raw_section = raw_tuning.get(yaml_section, {}) or {}
@@ -322,12 +353,15 @@ def _build_tuning(raw_tuning: dict[str, Any]) -> Tuning:
             raise ProfileValidationError(
                 f"Unknown Tuning.{yaml_section} key(s): {sorted(unknown_section_keys)}"
             )
+        section_field_types = _SECTION_FIELD_TYPES[yaml_section]
         section_kwargs: dict[str, Any] = {}
         for yaml_key, (sub_attr, bounds) in key_map.items():
             if yaml_key in raw_section:
                 value = raw_section[yaml_key]
-                _check_range(f"{yaml_section}.{yaml_key}", value, bounds)
-                section_kwargs[sub_attr] = value
+                expected_type = section_field_types.get(sub_attr)
+                section_kwargs[sub_attr] = _validate_numeric(
+                    f"{yaml_section}.{yaml_key}", value, bounds, expected_type
+                )
         top_kwargs[attr] = dataclass_type(**section_kwargs)
 
     return Tuning(**top_kwargs)
