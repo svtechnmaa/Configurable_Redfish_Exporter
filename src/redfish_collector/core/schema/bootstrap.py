@@ -48,7 +48,17 @@ async def discover_bootstrap(common: CommonSchemaV2, fetch: FetchFunc) -> tuple[
         if not captures.get(required_name):
             raise ExecutorError(f"Bootstrap.System.Capture: required capture {required_name!r} resolved to nothing")
 
-    if common.bootstrap.chassis_collection_uri:
+    # `captures.get("chassis_collection")` (not just `chassis_collection_uri`
+    # being configured at the schema level) must gate this: `chassis_collection`
+    # is unconditionally set in `captures` by the ServiceRoot capture loop
+    # above, as `None` when a target's ServiceRoot has no `Chassis` link.
+    # Jinja2 renders a captured Python `None` as the literal string `"None"`,
+    # not `""` (only a genuinely MISSING key renders as empty) — so without
+    # this check, a target lacking a `Chassis` link would render the
+    # collection URI as the string `"None"` and attempt a real fetch against
+    # it, instead of skipping chassis discovery as the contract's own
+    # "Optional capability; skipped when the capture is absent" describes.
+    if common.bootstrap.chassis_collection_uri and captures.get("chassis_collection"):
         try:
             chassis_collection_uri = Template(common.bootstrap.chassis_collection_uri).render(captures)
             chassis_collection = await fetch(chassis_collection_uri)

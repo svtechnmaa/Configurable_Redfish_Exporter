@@ -60,7 +60,10 @@ Resources:
     Strategies:
       - Id: main
         Kind: object
-        URI: "/redfish/v1/Chassis/{{ system_id }}/Thermal"
+        # Follows the target's actual discovered chassis link
+        # (`Bootstrap.Chassis` in Common.yml) rather than assuming chassis
+        # id == system id, which real R750 hardware does not guarantee.
+        URI: "{{ chassis_uri }}/Thermal"
         Children:
           Fans:
             Strategies:
@@ -76,7 +79,9 @@ Resources:
     Strategies:
       - Id: main
         Kind: object
-        URI: "/redfish/v1/Chassis/{{ system_id }}/Power"
+        # See Thermal above: follows the discovered chassis link, not
+        # `/Chassis/{{ system_id }}`.
+        URI: "{{ chassis_uri }}/Power"
         Children:
           PowerSupplies:
             Strategies:

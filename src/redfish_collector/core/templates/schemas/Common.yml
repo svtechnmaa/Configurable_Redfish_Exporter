@@ -11,11 +11,24 @@ Bootstrap:
     Capture:
       service_root: "$.Id"
       systems_collection: '$.Systems."@odata.id"'
+      # Optional capability (contract §1): absent when a target's
+      # ServiceRoot has no `Chassis` link. `bootstrap.py` treats that as
+      # "skip chassis discovery for this target", never an error.
+      chassis_collection: '$.Chassis."@odata.id"'
   System:
     Capture:
       system_id: "$.Id"
       manufacturer: "$.Manufacturer"
       model: "$.Model"
+  # A vendor schema's Thermal/Power (or any other chassis-scoped) resource
+  # must follow the target's ACTUAL chassis link via `{{ chassis_uri }}`,
+  # never assume chassis id == system id by constructing `/Chassis/{{
+  # system_id }}` — that assumption breaks whenever a real BMC's chassis
+  # identifier differs from its System identifier (e.g. DellPowerEdgeR750.yml).
+  Chassis:
+    CollectionURI: "{{ chassis_collection }}"
+    Capture:
+      chassis_uri: "$.@odata.id"
 ModelSchemas:
   - Id: hpe-gen9
     Priority: 70
