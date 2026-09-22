@@ -16,7 +16,15 @@ env:
 jobs:
   build:
     name: Build and push redfish-exporter
+<<<<<<< HEAD
+    # Must be the Docker-in-Docker-provisioned runner, not bare
+    # `self-hosted` — this job runs `docker buildx`/`docker build`, which
+    # needs a reachable Docker daemon (/var/run/docker.sock). Not every
+    # `self-hosted` runner in the pool has one; `ubuntu-dind` does.
+    runs-on: ubuntu-dind
+=======
     runs-on: self-hosted
+>>>>>>> 22c6db3f3ed6c4801cac2114ef66426cd44a2812
     permissions:
       contents: read
       packages: write
