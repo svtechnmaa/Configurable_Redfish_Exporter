@@ -16,53 +16,9 @@ env:
   IMAGE_NAME: 'redfish-exporter'
 
 jobs:
-  gate:
-    name: Validate /build request
-    # Only an exact "/build" comment on a PR (not a plain issue), from a
-    # commenter GitHub itself classifies as OWNER/MEMBER/COLLABORATOR.
-    # This authorizes *who* may ask for a build; it says nothing about
-    # *what* gets built, since the PR head can still be a fork — that is
-    # checked separately below, before anything privileged runs.
-    if: >
-      github.event.issue.pull_request != null &&
-      github.event.comment.body == '/build' &&
-      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: read
-    outputs:
-      head_sha: ${{ steps.pr.outputs.head_sha }}
-      is_fork: ${{ steps.pr.outputs.is_fork }}
-    steps:
-      - name: Resolve PR head commit and fork status
-        id: pr
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.issue.number }}
-        run: |
-          set -euo pipefail
-          pr_json=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}")
-          head_sha=$(jq -r '.head.sha' <<<"$pr_json")
-          head_repo=$(jq -r '.head.repo.full_name // ""' <<<"$pr_json")
-          echo "head_sha=${head_sha}" >> "$GITHUB_OUTPUT"
-          if [ "$head_repo" = "$REPO" ]; then
-            echo "is_fork=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_fork=true" >> "$GITHUB_OUTPUT"
-          fi
-
-  build_and_push:
-    name: Build and push redfish-exporter (PR)
-    needs: gate
-    # A PR whose head lives in a fork is untrusted content: it must never
-    # reach the build/push steps below, which run with `packages: write`.
-    # Requiring `success()` explicitly here matters because this job
-    # defines its own `if` — that replaces, not adds to, the implicit
-    # "skip if `gate` was skipped/failed" check GitHub only applies when
-    # no custom `if` is given.
-    if: success() && needs.gate.outputs.is_fork == 'false'
-    runs-on: ubuntu-latest
+  build:
+    name: Build and push redfish-exporter
+    runs-on: self-hosted
     permissions:
       contents: read
       packages: write
