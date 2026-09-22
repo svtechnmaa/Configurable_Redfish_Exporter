@@ -9,3 +9,10 @@ test
 htmlcov/
 *.egg-info/
 __pycache__/
+
+# Local AI-tooling state/config, not project source
+.agents/
+.claude/
+.codex/
+.specify/
+prompt.txt

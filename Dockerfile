@@ -11,7 +11,12 @@ COPY ./src /opt/Configurable_Redfish_Exporter/src
 COPY MANIFEST.in /opt/Configurable_Redfish_Exporter/MANIFEST.in
 COPY setup.py /opt/Configurable_Redfish_Exporter/setup.py
 
-RUN pip3 install setuptools
+# --timeout/--retries: a slow/flaky link to files.pythonhosted.org can
+# exceed pip's default 15s socket read timeout mid-download (observed:
+# `urllib3.exceptions.ReadTimeoutError` failing this step outright) —
+# raising the timeout and giving pip its own retry budget survives a
+# transient stall instead of failing the whole build on the first one.
+RUN pip3 install --timeout 100 --retries 5 setuptools
 WORKDIR /opt/Configurable_Redfish_Exporter
 RUN python3 setup.py sdist --formats=gztar
 
@@ -31,7 +36,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 COPY --from=build /opt/Configurable_Redfish_Exporter/dist/*.tar.gz /tmp/redfish_exporter/physical-exporter.tar.gz
 RUN apk add --no-cache tzdata && \
     echo $TZ > /etc/timezone && \
-    pip install --no-cache-dir /tmp/redfish_exporter/physical-exporter.tar.gz && \
+    pip install --no-cache-dir --timeout 100 --retries 5 /tmp/redfish_exporter/physical-exporter.tar.gz && \
     rm -rf /tmp/* && \
     mkdir -p /opt/redfish_exporter && \
     ln -s /usr/local/lib/python3.12/site-packages/redfish_collector/core/templates /opt/redfish_exporter/templates && \

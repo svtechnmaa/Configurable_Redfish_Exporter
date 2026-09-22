@@ -2,7 +2,7 @@
 # nor scripts/test-env.sh reads it) — `setup.py`'s `install_requires` is the
 # actual single source of truth for dependency resolution. Kept here, exactly
 # mirroring setup.py, as a plain-text reference only; update both together.
-PyYAML==6.0.3
+PyYAML==6.0.2
 jsonpath-ng==1.8.0
 pydantic==2.13.5
 Jinja2==3.1.6

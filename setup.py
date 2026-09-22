@@ -38,7 +38,14 @@ setup(
     # syntactically-incompatible pre-async/await release.
     install_requires=[
         "prometheus-client==0.26.0",
-        "pyyaml==6.0.3",
+        # 6.0.2, not the newer 6.0.3 (2025-09-25) — this codebase only ever
+        # calls `yaml.safe_load`/`safe_dump` (unchanged across both), and
+        # 6.0.2 is old/ubiquitous enough to already be mirrored everywhere,
+        # unlike 6.0.3 which some package indexes/proxies may not have
+        # synced yet (observed: Docker build failing with "Could not find a
+        # version that satisfies the requirement pyyaml==6.0.3 ... from
+        # versions: none" on the Alpine runtime stage).
+        "pyyaml==6.0.2",
         # jsonpath-ng's `full_path` parenthesization behavior (relied on by
         # dataReconstruction.py's paren-stripping) is version-specific —
         # exact-pinned, not a floor.

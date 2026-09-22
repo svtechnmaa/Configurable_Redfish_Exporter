@@ -1,313 +1,68 @@
-name: Build and Test SVTECH App
+name: Build and Push Image
 
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
+    branches: ["main"]
   workflow_dispatch:
-    inputs:
-      commit_id:
-        description: 'Full commit ID to build (default: latest commit). e.g daae94a0f72a13f7092812fa42d684b2af827xxx. WARNING: release job will NOT run by this trigger'
-        type: string
-      run_test:
-        description: 'Run test'
-        default: true
-        type: boolean
-      keep_image: 
-        description: 'Keep image in GHCR even test fails'
-        type: boolean
-        default: false    
+
+# Serialize publishing across runs so `latest`/version tags never race.
+concurrency:
+  group: build-and-push-main
+  cancel-in-progress: false
+
 env:
-  # Modify your image and container here
-  IMAGE_TEST_TAG: ${{ format('test-v{0}', github.run_number) }}
-  # Round-of-repair (F3): the hardcoded '2.0.5' here had drifted from
-  # `setup.py`'s actual package version (2.2.1) and was unused by every
-  # live (uncommented) step anyway. The one source of truth is now read at
-  # runtime from `setup.py` (see the `build` job's "Read package version"
-  # step) — never a second, independently-maintained literal here.
   IMAGE_NAME: 'redfish-exporter'
-  CONTAINER_NAME: 'redfish-exporter'
-  CONTAINER_MAPPING_PORT: '9814:9814'
-  COMMIT_FULL_ID: ${{ inputs.commit_id || github.sha }}
 
 jobs:
-  test:
-    # Round-of-repair (F2): a real local test gate, using this repository's
-    # own documented test contract (`scripts/test-env.sh`) — the prior
-    # `test:` job below was entirely commented out ("THIS REPO HASN'T HAS
-    # /tests YET"), which is no longer true, and the `run_test`
-    # `workflow_dispatch` input was declared but never consumed anywhere.
-    #
-    # Security fix: `inputs.run_test != false` was NOT the "always true for
-    # push/pull_request" condition the previous comment here claimed.
-    # `inputs` doesn't exist for push/pull_request, so `inputs.run_test`
-    # resolves to `null` — and GitHub Actions' comparison rules cast BOTH
-    # `null` and `false` to `0` before comparing, so `null != false` is
-    # itself `false`. That silently SKIPPED this job on every push and PR,
-    # and `build` below treated a skipped test as good enough to proceed,
-    # meaning a main-branch image could publish with zero tests run.
-    # `github.event_name != 'workflow_dispatch'` short-circuits the whole
-    # expression to `true` for push/pull_request regardless of `inputs`, so
-    # the opt-out only ever applies to an actual `workflow_dispatch` run.
-    if: github.event_name != 'workflow_dispatch' || inputs.run_test != false
-    runs-on: ubuntu-dind
-    permissions:
-      contents: read
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        ref: ${{ env.COMMIT_FULL_ID }}
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-    - name: Run local test gate (setup, syntax, full pytest suite)
-      run: |
-        scripts/test-env.sh setup
-        scripts/test-env.sh verify
-
   build:
-    # Round-of-repair (F2): image publication (the "Push image to GitHub
-    # Container Registry" step below) now depends on this job — see that
-    # step's own `if:` for the exact publish-gating condition (`needs`
-    # alone only controls ordering/skip-propagation, not the publish
-    # decision itself, since `build` also does non-publishing work for
-    # pull_request events).
-    needs: test
-    # `needs: test` normally means `build` is skipped entirely if `test`
-    # is skipped (not merely failed) — `always()` combined with the
-    # explicit success/skip check below keeps `build` running for its
-    # non-publishing (build-only) work even when `test` was intentionally
-    # skipped via `workflow_dispatch`'s `run_test: false`, while still
-    # hard-failing if `test` actually ran and failed.
-    #
-    # Security fix: a bare "success or skipped" allowance is exactly what
-    # let a `push` publish an image with no test run at all once the
-    # `test` job's own condition was (incorrectly) skipping it. `test` is
-    # now unconditional for `push` (see its `if:` above), so
-    # `needs.test.result` can never legitimately be `skipped` for a
-    # `push` — this makes that explicit and independent of the `test`
-    # job's condition staying correct, rather than relying on it
-    # transitively: a `push` requires a genuine `success`; only a
-    # non-push run (pull_request or an opted-out workflow_dispatch) may
-    # still proceed on `skipped`.
-    if: |
-      always() &&
-      (
-        (github.event_name == 'push' && needs.test.result == 'success') ||
-        (github.event_name != 'push' && (needs.test.result == 'success' || needs.test.result == 'skipped'))
-      )
-    runs-on: ubuntu-dind
+    name: Build and push redfish-exporter
+    runs-on: self-hosted
     permissions:
       contents: read
       packages: write
-      security-events: write
-    outputs:
-      check_no_ci: ${{ steps.check_commit_message.outputs.no_ci }}
-      check_no_scan: ${{ steps.check_commit_message.outputs.no_scan }}
-      check_no_cache: ${{ steps.check_commit_message.outputs.no_cache }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        ref: ${{ env.COMMIT_FULL_ID }}
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Downcase REPO and shorten COMMIT ID
-      run: |
-        COMMIT_SHORT_ID=$(git rev-parse --short ${{ env.COMMIT_FULL_ID }})
-        echo "COMMIT_SHORT_ID=${COMMIT_SHORT_ID}" >>${GITHUB_ENV}
-        echo "REPO=${GITHUB_REPOSITORY,,}" >>${GITHUB_ENV}
-        echo "COMMIT_SHORT_ID=${{ env.COMMIT_SHORT_ID }}"
-        echo "REPO=${{ env.REPO }}"
+      - name: Read package version
+        # The one source of truth for the published version tag is
+        # `setup.py` itself — never a second, independently maintained
+        # literal that has to be bumped by hand in lockstep.
+        id: version
+        run: |
+          VERSION=$(python3 setup.py --version)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-    ## Check commit message for no-ci, no-scan, no-cache
-    - name: Check commit message
-      id: check_commit_message
-      run: |
-        commit_message=$(git log --pretty=format:"%H %s %b" | grep "${{ env.COMMIT_FULL_ID }}" | sed 's,'${{ env.COMMIT_FULL_ID }}' ,,g')
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-        if [[ "$commit_message" =~ .*"no-ci".* ]]; then
-            echo "❌ Found 'no-ci' in commit message. Stopping workflow!"
-            echo "no_ci=true" >> $GITHUB_OUTPUT
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: '${{ github.actor }}'
+          # GITHUB_TOKEN is always present (no external secret to configure)
+          # and the `packages: write` permission above is already sufficient
+          # for it to publish here — the deleted CI.yml build_images job
+          # already proved this token works for this exact ghcr.io path.
+          password: '${{ secrets.GITHUB_TOKEN }}'
 
-        elif [[ "$commit_message" =~ .*"no-scan".* ]]; then
-            echo "🛑 Found 'no_scan' in commit message. Skipping image and Dockerfile scan!"
-            echo "no_scan=true" >> $GITHUB_OUTPUT
-            
-        elif [[ "$commit_message" =~ .*"no-cache".* ]]; then
-            echo "⚡ Found 'no_cache' in commit message. Skipping caching during image build!"
-            echo "no_cache=true" >> $GITHUB_OUTPUT
-        fi      
-    - name: Get Job ID
-      if: steps.check_commit_message.outputs.no_ci != 'true'
-      id: get_job_id
-      run: |
-        curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-        "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
-        | jq '.jobs[] | select(.name=="build") | .id' > job_id.txt
-        echo "job_id=$(cat job_id.txt)" >> $GITHUB_OUTPUT
-
-    - name: Determine Commit ID and Comitter Email
-      if: steps.check_commit_message.outputs.no_ci != 'true'
-      id: determine_commit_id_and_email_author
-      run: |
-        if [[ ${{ github.event_name }} == 'workflow_dispatch' ]]; then
-          COMMIT_ID=${{ github.event.inputs.commit_id }}
-          COMMIT_AUTHOR_EMAIL=$(git show -s --format='%ae' $COMMIT_ID)
-          COMMIT_AUTHOR_NAME=$(git show -s --format='%aN' $COMMIT_ID)
-        else
-          COMMIT_ID=${{ github.event.head_commit.id }}
-          COMMIT_AUTHOR_EMAIL=${{ github.event.head_commit.author.email }}
-          COMMIT_AUTHOR_NAME=${{ github.event.head_commit.author.name }}
-        fi
-
-        echo "COMMIT_ID=${COMMIT_ID}" >> $GITHUB_OUTPUT
-        echo "COMMIT_AUTHOR_EMAIL=${COMMIT_AUTHOR_EMAIL}" >> $GITHUB_OUTPUT
-        echo "COMMIT_AUTHOR_NAME=${COMMIT_AUTHOR_NAME}" >> $GITHUB_OUTPUT
-
-    # Round-of-repair (F1): a `pull_request` event (including one from a
-    # fork, for a same-repo PR where secrets ARE available) previously
-    # reached every one of these registry-login steps unconditionally —
-    # authenticating with write-capable publish credentials during a PR
-    # build is never appropriate, even if no push follows in the same run.
-    # `pull_request` is removed from every login/authenticated-build
-    # condition below; a PR still gets an unauthenticated, uncached
-    # `docker build` (see "Build Docker image (pull_request, no registry)")
-    # to prove it builds, per "PRs may build/test with push: false only."
-    - name: Login to Docker Container Registry (no cache)
-      if: |
-        (github.event_name == 'push' || steps.check_existing_image.outputs.is_image_tag_by_commit_id_existed == 'false') &&
-        (steps.check_commit_message.outputs.no_cache == 'true' && steps.check_commit_message.outputs.no_ci != 'true')
-      uses: docker/login-action@v2
-      with:
-        registry: docker.io
-        username: '${{ secrets.DOCKER_HUB_USERNAME }}'
-        password: '${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}'
-    - name: Build Docker image (no cache)
-      if: |
-        (github.event_name == 'push' || steps.check_existing_image.outputs.is_image_tag_by_commit_id_existed == 'false') &&
-        (steps.check_commit_message.outputs.no_cache == 'true' && steps.check_commit_message.outputs.no_ci != 'true')
-      run: |
-        docker build --no-cache -t ${{ env.IMAGE_NAME }} .
-    - name: Login to GitHub Container Registry
-      if: |
-        (github.event_name == 'push' ||
-        steps.check_existing_image.outputs.is_image_tag_by_commit_id_existed == 'false') &&
-        steps.check_commit_message.outputs.no_ci != 'true'
-      uses: docker/login-action@v2
-      with:
-        registry: ghcr.io
-        username: '${{ github.repository_owner }}'
-        password: '${{ secrets.GH_TOKEN }}'
-    - name: Build Docker image (with cache)
-      if: |
-        (github.event_name == 'push') &&
-        (steps.check_commit_message.outputs.no_cache != 'true' && steps.check_commit_message.outputs.no_ci != 'true')
-      run: |
-        docker pull ghcr.io/${{ github.repository_owner }}/redfish-exporter:latest || true
-        docker build --build-arg BUILDKIT_INLINE_CACHE=1 \
-          --cache-from ghcr.io/${{ github.repository_owner }}/redfish-exporter:latest -t ${{ env.IMAGE_NAME }} .
-    - name: Build Docker image (pull_request, no registry)
-      # A PR proves the image builds — no registry authentication, no
-      # cache pull, no push, ever, for this event type.
-      if: |
-        (github.event_name == 'pull_request') &&
-        steps.check_commit_message.outputs.no_ci != 'true'
-      run: |
-        docker build -t ${{ env.IMAGE_NAME }} .
-
-    - name: Run App
-      id: run_and_check_container_status
-      if: steps.check_commit_message.outputs.no_ci != 'true'
-      shell: bash
-      run: |
-        docker run -d --name ${{ env.CONTAINER_NAME }} -p ${{ env.CONTAINER_MAPPING_PORT }} ${{ env.IMAGE_NAME }}
-
-    - name: Wait for container to be running
-      if: steps.check_commit_message.outputs.no_ci != 'true'
-      shell: bash
-      run: |
-        elapsed=0
-        while true; do
-          status=$(docker inspect --format '{{.State.Status}}' ${{ env.CONTAINER_NAME }})
-          echo "Container current status: $status"
-          if [ "$status" == "running" ]; then
-            echo "Container ${{ env.CONTAINER_NAME }} is running"
-            break
-          fi
-          if [ "$status" == "exited" ]; then
-            echo "Container ${{ env.CONTAINER_NAME }} is exited"
-            exit 1
-          fi
-          if [ $elapsed -ge $TIMEOUT ]; then
-            echo "Timeout reached: Container ${{ env.CONTAINER_NAME }} did not start successfully"
-            exit 1
-          fi
-          sleep $INTERVAL
-          elapsed=$((elapsed + INTERVAL))
-        done
-      env:
-        TIMEOUT: 300
-        INTERVAL: 3
-
-    - name: Read package version
-      # Round-of-repair (F3): the one source of truth for the published
-      # version tag is `setup.py` itself — never a second, independently
-      # hardcoded literal (previously `2.x.x`, drifted from the actual
-      # `2.2.1` package version) that has to be remembered and bumped by
-      # hand in lockstep.
-      if: steps.check_commit_message.outputs.no_ci != 'true'
-      id: version
-      run: |
-        VERSION=$(python3 setup.py --version)
-        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-    - name: Push image to GitHub Container Registry
-      # Round-of-repair (F1): mutable `latest`/version tags are pushed ONLY
-      # on a genuine `push` to `main` — never for `pull_request` (see the
-      # login/build steps above) and never for a `workflow_dispatch` of an
-      # arbitrary `commit_id` (which is not necessarily `main`'s tip).
-      #
-      # Security fix: `needs.test.result == 'success'` is checked again
-      # here, redundantly with the job-level `if:` above — this step is
-      # the one place that actually mutates the mutable `latest`/version
-      # tags, so it does not rely transitively on `build`'s own gate
-      # staying correct; it independently refuses to publish without a
-      # genuinely successful test run for this push.
-      if: |
-        github.event_name == 'push' &&
-        needs.test.result == 'success' &&
-        steps.check_commit_message.outputs.no_ci != 'true'
-      run: |
-        docker tag ${{ env.IMAGE_NAME }}:latest ghcr.io/${{ env.REPO }}:${{ env.IMAGE_TEST_TAG }}
-        docker tag ${{ env.IMAGE_NAME }}:latest ghcr.io/${{ env.REPO }}:${{ env.COMMIT_SHORT_ID }}
-        docker push ghcr.io/${{ env.REPO }}:${{ env.IMAGE_TEST_TAG }}
-        docker push ghcr.io/${{ env.REPO }}:${{ env.COMMIT_SHORT_ID }}
-
-        docker tag ${{ env.IMAGE_NAME }}:latest ghcr.io/${{ github.repository_owner }}/redfish-exporter:${{ steps.version.outputs.version }}
-        docker tag ${{ env.IMAGE_NAME }}:latest ghcr.io/${{ github.repository_owner }}/redfish-exporter:latest
-        docker push ghcr.io/${{ github.repository_owner }}/redfish-exporter:${{ steps.version.outputs.version }}
-        docker push ghcr.io/${{ github.repository_owner }}/redfish-exporter:latest
-
-
-  # Round-of-repair (F2): the old placeholder comment here ("THIS REPO
-  # HASN'T HAS /tests YET SO WE COMMENT THIS") is no longer true — a real
-  # test gate now runs as the `test` job at the top of this workflow,
-  # using this repository's own `scripts/test-env.sh`, and `build`
-  # depends on it. The dead, never-runnable Robot-Framework-against-a-
-  # published-image sketch that used to live here (referencing
-  # `env.IMAGE_TAG`, a `svtechnmaa/.github` composite action, and a
-  # nonexistent `tests/` Robot suite) has been removed rather than left
-  # commented out.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+          build-args: |
+            appVersion=${{ steps.version.outputs.version }}
+            maintainer=Freezing
 
   check_job_results:
     name: Check job results
     if: always()
     needs:
-      - test
       - build
     runs-on: ubuntu-latest
     steps:

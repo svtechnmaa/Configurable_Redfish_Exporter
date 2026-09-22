@@ -11,6 +11,14 @@ Auth:
 # the full reference.
 Tuning:
   MaxParallelTargets: 50           # process-wide
+  # Per-BMC concurrent-request cap, shared by this target's Fast and Slow
+  # lanes (never shared with OTHER targets — each canonical BMC IP gets its
+  # own budget). One slot of this is always reserved for Fast
+  # (PriorityRequestDispatcher.RESERVED_FAST_SLOTS — fixed, not a Tuning
+  # key), so a due Fast re-fetch is admitted immediately even while Slow is
+  # using the rest of this budget, rather than queueing behind it. That
+  # reservation is dropped (no slot held back) when this is set to 1, so
+  # Slow is never starved outright.
   TargetConcurrency: 8             # process-wide
   MaxResponseBytes: 10485760       # process-wide
   Fast:
@@ -38,6 +46,9 @@ Tuning:
   Crawl:
     BatchSize: 8
     MaxQueuedRequestsPerLane: 64           # process-wide
+    # Consecutive Fast admissions favored over Slow once a slot frees AND
+    # both are already queued for it — distinct from (and on top of) the
+    # one TargetConcurrency slot always reserved for Fast above.
     FastBatchLimit: 4                      # process-wide
     MaxDepth: 4
   IO:

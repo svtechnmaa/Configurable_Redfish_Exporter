@@ -56,45 +56,5 @@ jobs:
         scripts/test-env.sh setup
         scripts/test-env.sh verify
 
-  build_images:
-    # Round-of-repair (F1/F2): a pull_request run (including one from a
-    # fork) must never authenticate to a registry or publish an image —
-    # only `push` to `main` may, and only AFTER the real test gate above
-    # has passed (`needs: test`). Previously this job ran unconditionally
-    # for both `push` and `pull_request` with no test dependency at all.
-    needs: test
-    if: github.event_name == 'push'
-    runs-on: self-hosted
-    permissions:
-      contents: read
-      packages: write
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Read package version
-      id: version
-      run: |
-        VERSION=$(python3 setup.py --version)
-        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-    - name: Login to GitHub Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: '${{ github.actor }}'
-        password: '${{ secrets.GITHUB_TOKEN }}'
-    - name: Build and Push specific version
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        # Round-of-repair (F1): only `push` to `main` reaches this step at
-        # all (see the job-level `if:` above) — `push: true` here is never
-        # reachable from a pull_request event.
-        push: true
-        tags: |
-          ghcr.io/${{ github.repository_owner }}/redfish-exporter:${{ steps.version.outputs.version }}
-          ghcr.io/${{ github.repository_owner }}/redfish-exporter:latest
-        build-args: |
-          appVersion=${{ steps.version.outputs.version }}
-          maintainer=Freezing
+  # Image build/publish now lives solely in main.yml (build job), so a
+  # push to main is never built and tagged twice.

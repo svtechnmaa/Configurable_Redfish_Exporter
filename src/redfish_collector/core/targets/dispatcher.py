@@ -57,7 +57,22 @@ class _Lease:
 
 class PriorityRequestDispatcher:
     """One dispatcher per canonical BMC IP, shared by every open
-    `TargetRefreshContext` for that IP across all `config` identities."""
+    `TargetRefreshContext` for that IP across all `config` identities.
+
+    `RESERVED_FAST_SLOTS` of `capacity` are never given to a Slow admission
+    (immediate or queued) — Slow's own effective ceiling is `capacity -
+    RESERVED_FAST_SLOTS` (`_slow_capacity` below). Without this, a Fast
+    lane's own priority (`fast_batch_limit`) only ever decided who wins a
+    slot that had ALREADY freed up — it did nothing while Slow was busy
+    saturating every slot of THIS SAME target's own concurrency budget
+    (`capacity`; already isolated per canonical BMC IP, never shared across
+    targets), so a newly-due Fast request still had to queue and wait for a
+    Slow request to finish before it could even be admitted. Reserving a
+    slot Slow can never claim means a Fast request always finds `in_flight
+    < capacity` true and is admitted immediately, at the cost of Slow never
+    using that last slot even when no Fast request is currently waiting."""
+
+    RESERVED_FAST_SLOTS = 1
 
     def __init__(self, *, capacity: int, max_queued_per_lane: int, fast_batch_limit: int) -> None:
         if capacity < 1:
@@ -74,6 +89,11 @@ class PriorityRequestDispatcher:
         # wrong, duplicate, or cross-cycle release call is a no-op rather
         # than silently freeing a capacity slot no request actually held.
         self._admitted: set[tuple[str, str]] = set()
+        # The subset of `_admitted` that was admitted at `priority="slow"` —
+        # tracked separately (rather than storing priority inside
+        # `_admitted` itself) so `_admitted`'s own existing shape/tests are
+        # untouched. `slow_in_flight` is always `len(self._slow_admitted)`.
+        self._slow_admitted: set[tuple[str, str]] = set()
         # Round 5A.2: pairs `abandon_cycle()` forcibly stripped out of
         # `_admitted` at shutdown, before the owning request task itself ever
         # got to call `release()`. A LATE `release()` call for one of these
@@ -89,15 +109,39 @@ class PriorityRequestDispatcher:
         # awaiting their one expected late release.
         self._abandoned_pairs: set[tuple[str, str]] = set()
 
+    @property
+    def slow_in_flight(self) -> int:
+        return len(self._slow_admitted)
+
+    @property
+    def _slow_capacity(self) -> int:
+        """Slow's own effective ceiling. `min(...)` degrades to no
+        reservation at all (`capacity`) when `capacity` is too small to
+        spare a slot (e.g. `Tuning.TargetConcurrency: 1`) — Slow must never
+        be starved entirely just to satisfy a reservation it has no room
+        for."""
+        reserved = min(self.RESERVED_FAST_SLOTS, max(self.capacity - 1, 0))
+        return self.capacity - reserved
+
     def lease(self, priority: str, cycle_id: str, request_id: str) -> _Lease:
         return _Lease(self, priority, cycle_id, request_id)
+
+    def _admit_immediately(self, priority: str, cycle_id: str, request_id: str) -> bool:
+        if priority == "slow" and self.slow_in_flight >= self._slow_capacity:
+            return False
+        if self.in_flight >= self.capacity:
+            return False
+        self.in_flight += 1
+        pair = (cycle_id, request_id)
+        self._admitted.add(pair)
+        if priority == "slow":
+            self._slow_admitted.add(pair)
+        return True
 
     async def acquire(self, priority: str, cycle_id: str, request_id: str) -> None:
         if priority not in ("fast", "slow"):
             raise ValueError(f"priority must be 'fast' or 'slow', got {priority!r}")
-        if self.in_flight < self.capacity:
-            self.in_flight += 1
-            self._admitted.add((cycle_id, request_id))
+        if self._admit_immediately(priority, cycle_id, request_id):
             return
 
         queue = self.fast_queue if priority == "fast" else self.slow_queue
@@ -150,31 +194,42 @@ class PriorityRequestDispatcher:
             )
             return
         self._admitted.discard(pair)
+        self._slow_admitted.discard(pair)
         self.in_flight -= 1
         self._admit_next()
 
     def _admit_next(self) -> None:
         waiter: Optional[_Waiter] = None
+        priority = "fast"
         if self.fast_queue and self.consecutive_fast_without_slow < self.fast_batch_limit:
             waiter = self.fast_queue.popleft()
             self.consecutive_fast_without_slow += 1
-        elif self.slow_queue:
+        elif self.slow_queue and self.slow_in_flight < self._slow_capacity:
             waiter = self.slow_queue.popleft()
             self.consecutive_fast_without_slow = 0
+            priority = "slow"
         elif self.fast_queue:
             waiter = self.fast_queue.popleft()
             self.consecutive_fast_without_slow += 1
+        # else: nothing eligible — either both queues are empty, or the
+        # only queued work is Slow and it is already at `_slow_capacity`.
+        # That freed slot is deliberately left idle rather than handed to
+        # Slow, exactly the reservation `_slow_capacity` exists to enforce.
 
         if waiter is None:
             return
         self.in_flight += 1
-        self._admitted.add((waiter.cycle_id, waiter.request_id))
+        pair = (waiter.cycle_id, waiter.request_id)
+        self._admitted.add(pair)
+        if priority == "slow":
+            self._slow_admitted.add(pair)
         if not waiter.future.done():
             waiter.future.set_result(None)
         else:
             # Already cancelled between being queued and admitted here —
             # undo the increment and try the next waiter instead.
-            self._admitted.discard((waiter.cycle_id, waiter.request_id))
+            self._admitted.discard(pair)
+            self._slow_admitted.discard(pair)
             self.in_flight -= 1
             self._admit_next()
 
@@ -213,6 +268,7 @@ class PriorityRequestDispatcher:
         stale = [pair for pair in self._admitted if pair[0] == cycle_id]
         for pair in stale:
             self._admitted.discard(pair)
+            self._slow_admitted.discard(pair)
             self.in_flight -= 1
             # Record so the owning request task's own eventual (possibly
             # much later) `release()` call for this exact pair is recognized
