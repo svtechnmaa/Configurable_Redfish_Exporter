@@ -310,8 +310,25 @@ def _validate_numeric(
     8.5` previously passed this check (8.5 is numeric and within [1, 64])
     and was stored as-is, only to blow up `range(0, n, 8.5)` in
     `batching.bounded_gather` during request processing, not at startup.
+
+    `bounds is None` marks a non-numeric field (currently only
+    `Tuning.Debug.RootDirectory`/`WriteRawData`/`WriteNormalizedData`) — it
+    still must match `expected_type` exactly. Skipping that check let a
+    quoted YAML string like `WriteRawData: "false"` through unchanged: it is
+    truthy in Python, so `DebugArtifactStore.enabled()`
+    (`core/debug/artifacts.py`) and the `loglevel=debug` gate in
+    `routers/prometheus.py` would silently enable artifact persistence
+    despite the operator's intent to disable it.
     """
     if bounds is None:
+        if expected_type is bool and not isinstance(value, bool):
+            raise ProfileValidationError(
+                f"Tuning.{name} must be a boolean, got {type(value).__name__} {value!r}"
+            )
+        if expected_type is str and not isinstance(value, str):
+            raise ProfileValidationError(
+                f"Tuning.{name} must be a string, got {type(value).__name__} {value!r}"
+            )
         return value
     low, high = bounds
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -361,6 +378,12 @@ def _build_tuning(raw_tuning: dict[str, Any]) -> Tuning:
                 expected_type = section_field_types.get(sub_attr)
                 section_kwargs[sub_attr] = _validate_numeric(
                     f"{yaml_section}.{yaml_key}", value, bounds, expected_type
+                )
+        if yaml_section == "Debug" and "root_directory" in section_kwargs:
+            root_directory = section_kwargs["root_directory"]
+            if not Path(root_directory).is_absolute():
+                raise ProfileValidationError(
+                    f"Tuning.Debug.RootDirectory must be an absolute path, got {root_directory!r}"
                 )
         top_kwargs[attr] = dataclass_type(**section_kwargs)
 

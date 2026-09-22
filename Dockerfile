@@ -29,7 +29,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 
 # COPY --from=build /opt/Configurable_Redfish_Exporter/src/redfish_exporter/templates /opt/Configurable_Redfish_Exporter/templates
 COPY --from=build /opt/Configurable_Redfish_Exporter/dist/*.tar.gz /tmp/redfish_exporter/physical-exporter.tar.gz
-RUN apk add tzdata && \
+RUN apk add --no-cache tzdata && \
     echo $TZ > /etc/timezone && \
     pip install --no-cache-dir /tmp/redfish_exporter/physical-exporter.tar.gz && \
     rm -rf /tmp/* && \
