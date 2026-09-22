@@ -1,25 +1,67 @@
-Metadata:
-  RedfishV1:
-    "$inituri": /redfish/v1/Systems
-    "$jsonpath": $.Members[*].*
-    "$tokenuri": /redfish/v1/SessionService/Sessions
-    # ">>driveid": -1
-    ">>serverid": -1 ### key that you can collect from URI
-#  RedfishV2:
-
-# Data:
-#   Base:
-#     VendorId: $.Id
-#     Manufacturer: $.Manufacturer
-#     Model: $.Model
-
-ModelSchema:
-  HPE:
-      Gen9: HPEProLiantGen9.yml
-      Gen10: HPEProLiantGen10.yml
-      Gen11: HPEProLiantGen11.yml
-  Dell:
-      R750: DellPowerEdgeR750.yml
-      R650: DellPowerEdgeR650.yml
-      R630: DellPowerEdgeR630.yml
-      R6515: DellPowerEdgeR6515.yml
+# Migrated to v2 (T021/T046, cut over atomically with the router rewire).
+# Bootstrap/selection now use the explicit, self-contained contract in
+# contracts/schema-format-contract.md. HPE Gen11 and Dell R650 are migrated
+# to v2 vendor-model shape; every other currently-shipped model remains v1
+# shape, loaded permanently through the mixed-version bridge (contract §7)
+# — no behavior change for those models.
+Version: 2
+Kind: CommonSchema
+Bootstrap:
+  ServiceRoot:
+    Capture:
+      service_root: "$.Id"
+      systems_collection: '$.Systems."@odata.id"'
+      # Optional capability (contract §1): absent when a target's
+      # ServiceRoot has no `Chassis` link. `bootstrap.py` treats that as
+      # "skip chassis discovery for this target", never an error.
+      chassis_collection: '$.Chassis."@odata.id"'
+  System:
+    Capture:
+      system_id: "$.Id"
+      manufacturer: "$.Manufacturer"
+      model: "$.Model"
+  # A vendor schema's Thermal/Power (or any other chassis-scoped) resource
+  # must follow the target's ACTUAL chassis link via `{{ chassis_uri }}`,
+  # never assume chassis id == system id by constructing `/Chassis/{{
+  # system_id }}` — that assumption breaks whenever a real BMC's chassis
+  # identifier differs from its System identifier (e.g. DellPowerEdgeR750.yml).
+  Chassis:
+    CollectionURI: "{{ chassis_collection }}"
+    Capture:
+      chassis_uri: "$.@odata.id"
+ModelSchemas:
+  - Id: hpe-gen9
+    Priority: 70
+    ManufacturerRegex: "HPE"
+    ModelRegex: "Gen9"
+    Schema: HPEProLiantGen9.yml
+  - Id: hpe-gen10
+    Priority: 60
+    ManufacturerRegex: "HPE"
+    ModelRegex: "Gen10"
+    Schema: HPEProLiantGen10.yml
+  - Id: hpe-gen11
+    Priority: 100
+    ManufacturerRegex: "HPE"
+    ModelRegex: "Gen11"
+    Schema: HPEProLiantGen11.yml
+  - Id: dell-r750
+    Priority: 50
+    ManufacturerRegex: "Dell"
+    ModelRegex: "R750"
+    Schema: DellPowerEdgeR750.yml
+  - Id: dell-r650
+    Priority: 90
+    ManufacturerRegex: "Dell"
+    ModelRegex: "R650"
+    Schema: DellPowerEdgeR650.yml
+  - Id: dell-r630
+    Priority: 40
+    ManufacturerRegex: "Dell"
+    ModelRegex: "R630"
+    Schema: DellPowerEdgeR630.yml
+  - Id: dell-r6515
+    Priority: 30
+    ManufacturerRegex: "Dell"
+    ModelRegex: "R6515"
+    Schema: DellPowerEdgeR6515.yml

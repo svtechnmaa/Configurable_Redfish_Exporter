@@ -3,3 +3,16 @@ src/redfish_collector/profile_output*
 src/redfish_collector/core/__pycache__/
 src/redfish_collector/routers/__pycache__/
 test
+.venv-test/
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+__pycache__/
+
+# Local AI-tooling state/config, not project source
+.agents/
+.claude/
+.codex/
+.specify/
+prompt.txt

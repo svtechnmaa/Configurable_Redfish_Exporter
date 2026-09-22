@@ -1,6 +1,82 @@
 Auth:
-  Username: readonly
-  Password: juniper@123
+  Username: CHANGE_ME_USERNAME
+  Password: CHANGE_ME_PASSWORD
+# `Tuning` is optional — every key below defaults to exactly this value if
+# omitted. It is spelled out here (rather than left implicit) so an operator
+# copying this file for a second config knows the full available surface and
+# gets an identical `Tuning` block automatically: several of these keys
+# (marked below) must be IDENTICAL across every profile file in this
+# directory — the exporter refuses to start otherwise (process-wide
+# consistency, `core/config/profile.py`). See `design/configuration.md` for
+# the full reference.
+Tuning:
+  MaxParallelTargets: 50           # process-wide
+  # Per-BMC concurrent-request cap, shared by this target's Fast and Slow
+  # lanes (never shared with OTHER targets — each canonical BMC IP gets its
+  # own budget). One slot of this is always reserved for Fast
+  # (PriorityRequestDispatcher.RESERVED_FAST_SLOTS — fixed, not a Tuning
+  # key), so a due Fast re-fetch is admitted immediately even while Slow is
+  # using the rest of this budget, rather than queueing behind it. That
+  # reservation is dropped (no slot held back) when this is set to 1, so
+  # Slow is never starved outright.
+  TargetConcurrency: 8             # process-wide
+  MaxResponseBytes: 10485760       # process-wide
+  Fast:
+    TTLSeconds: 30
+    DeadlineSeconds: 15
+  Slow:
+    TTLSeconds: 900
+    DeadlineSeconds: 90
+  Cycle:
+    MaxDurationSeconds: 180
+  Cache:
+    MaxTargets: 500                        # process-wide
+    IdleTargetTTLSeconds: 3600             # process-wide
+    ResponseTTLSeconds: 180
+    MaxEntries: 500                        # process-wide
+    MaxTotalBytes: 52428800                # process-wide
+    MaxSnapshotBytesPerLane: 10485760
+    MaxTotalSnapshotBytes: 104857600
+    MaxInFlightCandidateBytes: 104857600
+  Overload:
+    RetryAfterSeconds: 5                   # process-wide
+  Refresh:
+    MaxConcurrentRefreshes: 16             # process-wide
+    MaxConcurrentCyclesPerBmc: 8
+  Crawl:
+    BatchSize: 8
+    MaxQueuedRequestsPerLane: 64           # process-wide
+    # Consecutive Fast admissions favored over Slow once a slot frees AND
+    # both are already queued for it — distinct from (and on top of) the
+    # one TargetConcurrency slot always reserved for Fast above.
+    FastBatchLimit: 4                      # process-wide
+    MaxDepth: 4
+  IO:
+    MaxInFlightResponseBytes: 67108864     # process-wide
+  Login:
+    TimeoutSeconds: 60
+    MaxAttempts: 3
+  Request:
+    TimeoutSeconds: 30
+    MaxAttempts: 5
+    BackoffBaseSeconds: 0.5
+    BackoffCapSeconds: 30
+  Logout:
+    TimeoutSeconds: 60
+  Shutdown:
+    GraceSeconds: 30                       # process-wide
+  Debug:
+    RootDirectory: /tmp/redfish-data       # process-wide
+    WriteRawData: false                    # process-wide
+    WriteNormalizedData: false             # process-wide
+    MaxFileBytes: 5242880                  # process-wide
+    MaxFilesPerTarget: 4                   # process-wide
+    MaxTotalBytes: 104857600               # process-wide
+    RetentionSeconds: 3600                 # process-wide
+  Telemetry:
+    MaxFutureSkewSeconds: 300
+    MaxAgeSeconds: 3600
+    MaxValuesReadPerReport: 50000
 Metrics:
   - Name: PhysicalServer_State
     Description: 'physical server state status'
