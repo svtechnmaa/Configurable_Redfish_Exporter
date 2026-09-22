@@ -93,6 +93,18 @@ jobs:
             --build-arg maintainer=Freezing \
             .
 
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.issue.number }}
+          build-args: |
+            appVersion=${{ steps.version.outputs.version }}
+            maintainer=Freezing
+
       # Login only happens after a successful build, and only this step
       # and the next can push — build failure above stops the job here.
       - name: Log in to GitHub Container Registry
