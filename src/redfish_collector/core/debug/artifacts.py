@@ -54,11 +54,12 @@ class DebugArtifactStore:
         a directory component (or the target/filename itself) with a
         symlink between the check and the later `mkstemp`/`os.replace` call
         could redirect the write outside `root_directory` undetected. Every
-        path component here is opened relative to its own already-open
-        parent directory FD with `O_NOFOLLOW` (`openat`/`mkdirat`
-        semantics) — a symlink swapped in at any point after (or during)
-        this call fails closed (`OSError`) instead of being silently
-        followed."""
+        path component here — including `RootDirectory` itself and every
+        one of its parent components, via `_open_root_dir_fd` — is opened
+        relative to its own already-open parent directory FD with
+        `O_NOFOLLOW` (`openat`/`mkdirat` semantics) — a symlink swapped in
+        at any point (before this call starts, or during it) fails closed
+        (`OSError`) instead of being silently followed."""
         if not self.enabled():
             return None
         if not filename or "/" in filename or filename in (".", ".."):
@@ -85,8 +86,7 @@ class DebugArtifactStore:
         while self._total_bytes + len(encoded) > self.max_total_bytes and self._files:
             self._evict_oldest_global()
 
-        root.mkdir(parents=True, exist_ok=True)  # root itself is operator-configured, not attacker-influenced
-        root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        root_fd = self._open_root_dir_fd(root)
         try:
             target_fd = self._open_or_create_subdir(root_fd, dirname)
             try:
@@ -117,6 +117,34 @@ class DebugArtifactStore:
         self._total_bytes += len(encoded) - old_size
         self._files[key] = (current_time, len(encoded))
         return final_path
+
+    @staticmethod
+    def _open_root_dir_fd(root: Path) -> int:
+        """Opens/creates `root` (an absolute path) as a directory FD by
+        walking it component-by-component from the filesystem root, each
+        step an `openat`/`mkdirat` with `O_NOFOLLOW` relative to the
+        previous already-open directory FD. A single pathname
+        `Path.mkdir(parents=True)`/`os.open(str(root))` instead resolves
+        the WHOLE path in one kernel call, following any symlink along the
+        way — including one planted as `RootDirectory` itself, or as any
+        of its parent components, before this call ever runs. Walking
+        component-by-component with `O_NOFOLLOW` at each step means a
+        symlink anywhere on the path fails this closed (`OSError`) instead
+        of silently redirecting where debug artifacts land."""
+        fd = os.open(os.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for part in root.parts[1:]:
+                try:
+                    os.mkdir(part, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
 
     @staticmethod
     def _open_or_create_subdir(parent_fd: int, name: str) -> int:
