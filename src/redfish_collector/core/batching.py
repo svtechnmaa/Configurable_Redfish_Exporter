@@ -32,17 +32,38 @@ async def bounded_gather(coros: Sequence[Awaitable[Any]], *, batch_size: int = D
     results: list[Any] = []
     for start in range(0, len(coros_list), batch_size):
         batch = coros_list[start : start + batch_size]
+        # Tasks, not bare coroutines, are handed to `gather` — `gather`
+        # would wrap them into Tasks internally either way, but only a Task
+        # we hold a reference to can be cancelled below. Creating them
+        # explicitly (instead of relying on `gather`'s implicit wrapping)
+        # schedules every one of them onto the loop up front, exactly like
+        # the old bare-coroutine `gather(*batch)` did.
+        tasks = [asyncio.ensure_future(c) for c in batch]
         try:
-            results.extend(await asyncio.gather(*batch))
+            results.extend(await asyncio.gather(*tasks))
         except BaseException:
-            # A failure in THIS batch still leaves every coroutine object in
-            # every LATER batch un-awaited — `asyncio.gather` only ever
-            # schedules the batch it was actually given, so this loop would
-            # otherwise abandon them, and Python logs a "coroutine ... was
-            # never awaited" `RuntimeWarning` for each one at GC time
-            # (round-9 code-review finding). Close them explicitly so no
-            # such warning fires, then re-raise the original failure
-            # unchanged — this method never suppresses or alters it.
+            # Round-of-repair (code-review finding): when one task in THIS
+            # batch fails, `gather` (without `return_exceptions=True`)
+            # re-raises immediately but does NOT cancel its siblings — they
+            # keep running against the target in the background, entirely
+            # untracked by this function, outliving the failed lane. Cancel
+            # every sibling that is not already done and await them (with
+            # `return_exceptions=True` so a `CancelledError`/any other
+            # exception from that drain never masks the original failure)
+            # before proceeding, so no task from this batch is still
+            # in-flight once this function returns control to its caller.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # Every coroutine object in every LATER batch is still
+            # un-awaited — `asyncio.gather` only ever schedules the batch it
+            # was actually given, so this loop would otherwise abandon them,
+            # and Python logs a "coroutine ... was never awaited"
+            # `RuntimeWarning` for each one at GC time (round-9 code-review
+            # finding). Close them explicitly so no such warning fires, then
+            # re-raise the original failure unchanged — this method never
+            # suppresses or alters it.
             for not_yet_scheduled in coros_list[start + batch_size :]:
                 not_yet_scheduled.close()
             raise
