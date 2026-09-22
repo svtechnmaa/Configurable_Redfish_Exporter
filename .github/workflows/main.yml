@@ -1,14 +1,16 @@
-name: Build and Push Image
+name: Build and Push PR Image
 
+# Fires on every PR comment, including on issues — the job-level `if`
+# below narrows this to an exact `/build` comment on a pull request.
 on:
-  push:
-    branches: ["main"]
-  workflow_dispatch:
+  issue_comment:
+    types: [created]
 
-# Serialize publishing across runs so `latest`/version tags never race.
+# One in-flight build per PR: a second /build cancels the previous one
+# instead of racing it for the same `pr-<PR_NUMBER>` tag.
 concurrency:
-  group: build-and-push-main
-  cancel-in-progress: false
+  group: pr-build-${{ github.event.issue.number }}
+  cancel-in-progress: true
 
 env:
   IMAGE_NAME: 'redfish-exporter'
@@ -21,13 +23,13 @@ jobs:
       contents: read
       packages: write
     steps:
-      - name: Checkout code
+      - name: Checkout PR head commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.head_sha }}
+          persist-credentials: false
 
       - name: Read package version
-        # The one source of truth for the published version tag is
-        # `setup.py` itself — never a second, independently maintained
-        # literal that has to be bumped by hand in lockstep.
         id: version
         run: |
           VERSION=$(python3 setup.py --version)
@@ -36,37 +38,26 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.issue.number }}
+          build-args: |
+            appVersion=${{ steps.version.outputs.version }}
+            maintainer=Freezing
+
+      # Login only happens after a successful build, and only this step
+      # and the next can push — build failure above stops the job here.
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: '${{ github.actor }}'
-          # GITHUB_TOKEN is always present (no external secret to configure)
-          # and the `packages: write` permission above is already sufficient
-          # for it to publish here — the deleted CI.yml build_images job
-          # already proved this token works for this exact ghcr.io path.
           password: '${{ secrets.GITHUB_TOKEN }}'
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
-          build-args: |
-            appVersion=${{ steps.version.outputs.version }}
-            maintainer=Freezing
-
-  check_job_results:
-    name: Check job results
-    if: always()
-    needs:
-      - build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check job results
-        uses: svtechnmaa/.github/actions/check_job_results@main
-        with:
-          jobs: ${{ toJSON(needs) }}
+      - name: Push image
+        run: docker push "ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.issue.number }}"
