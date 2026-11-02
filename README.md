@@ -191,4 +191,7 @@ To inspect the converted (normalized) data for one target, enable debug artifact
 Notes:
 - `loglevel` applies only to that request. It does **not** change the exporter's log verbosity. Logging is configured once at startup from `redfish_collector/logging/logging.yml`. To see `DEBUG` log lines, change the level there and restart.
 - Without `WriteNormalizedData: true`, `loglevel=debug` writes nothing. Without `loglevel=debug`, scrapes write nothing even when debug artifacts are enabled.
-- A failure to write the debug artifact is logged and never fails the scrape.
+- A failure to write the debug artifact is logged and never fails the scrape. The warning carries `event=debug_artifact_write_failed`, `errno` (e.g. `EACCES`) and `stage`, which tells you which directory is unwritable without logging the path:
+  - `root_directory_path`: a component of `RootDirectory` itself is missing or unwritable.
+  - `root_directory`: `RootDirectory` refused to create the hashed target directory.
+  - `target_directory`: the hashed target directory exists but cannot be opened or written (e.g. left behind by another UID, or a shared volume with different ownership).
