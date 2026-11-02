@@ -38,7 +38,7 @@ from ..core.targets.refresh_context import (
 )
 from ..core.targets.registry import RegistryFull, TargetRegistry
 from ..core.targets.response_cache import ResponseCache
-from ..core.debug.artifacts import DebugArtifactStore
+from ..core.debug.artifacts import DebugArtifactStore, describe_write_failure
 from os import path
 
 REDFISH_DATA = '/tmp/redfish-data/'
@@ -458,9 +458,10 @@ async def read_all(serverAddress: IPvAnyAddress = Query(None), config: str = Que
             try:
                 debug_store.write(canonical, config, "NormalizedData.json", merged)
             except Exception as debug_exc:  # noqa: BLE001 - a debug-artifact failure must never fail the scrape
+                errno_name, stage = describe_write_failure(debug_exc, canonical, config)
                 logging.warning(
-                    "[%s] failed to write normalized debug artifact (event=debug_artifact_write_failed, error=%s)",
-                    serverAddress_str, type(debug_exc).__name__,
+                    "[%s] failed to write normalized debug artifact (event=debug_artifact_write_failed, error=%s, errno=%s, stage=%s)",
+                    serverAddress_str, type(debug_exc).__name__, errno_name, stage,
                 )
 
         _emit_metrics(registry, componentMetrics, merged, serverAddress_str, profile.metrics)

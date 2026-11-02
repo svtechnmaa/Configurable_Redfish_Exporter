@@ -5,6 +5,7 @@ no-follow, under a target/config-hashed directory beneath `RootDirectory`.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import time
@@ -18,6 +19,29 @@ from ..security.containment import ContainmentError, debug_artifact_dirname
 
 class DebugArtifactError(Exception):
     pass
+
+
+def describe_write_failure(exc: BaseException, canonical_server_address: str, config: str) -> tuple[str, str]:
+    """Returns `(errno_name, stage)` for a failed `DebugArtifactStore.write`
+    so the warning can say WHICH directory is unwritable without logging the
+    raw path. `stage` is derived from `exc.filename`, the dirent the failing
+    `*at()` call was given: the hashed target dir name means `RootDirectory`
+    itself rejected the mkdir; a `.tmp-` name means the existing target dir
+    is unwritable (e.g. left by another UID); anything else is a component
+    of the `RootDirectory` path. `("-", "-")` for non-`OSError` failures."""
+    if not isinstance(exc, OSError) or exc.errno is None:
+        return "-", "-"
+    errno_name = errno.errorcode.get(exc.errno, str(exc.errno))
+    name = exc.filename
+    if name == debug_artifact_dirname(canonical_server_address, config):
+        stage = "root_directory"
+    elif isinstance(name, str) and name.startswith(".tmp-"):
+        stage = "target_directory"
+    elif name is not None:
+        stage = "root_directory_path"
+    else:
+        stage = "-"
+    return errno_name, stage
 
 
 @dataclass
