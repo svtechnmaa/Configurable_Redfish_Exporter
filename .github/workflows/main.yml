@@ -27,7 +27,7 @@ jobs:
       github.event.issue.pull_request != null &&
       github.event.comment.body == '/build' &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, falcon]
     permissions:
       pull-requests: read
     outputs:
