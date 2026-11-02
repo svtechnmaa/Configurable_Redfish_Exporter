@@ -21,19 +21,26 @@ class DebugArtifactError(Exception):
     pass
 
 
+_TARGET_OPEN_STAGE = "target_directory"
+
+
 def describe_write_failure(exc: BaseException, canonical_server_address: str, config: str) -> tuple[str, str]:
     """Returns `(errno_name, stage)` for a failed `DebugArtifactStore.write`
     so the warning can say WHICH directory is unwritable without logging the
-    raw path. `stage` is derived from `exc.filename`, the dirent the failing
-    `*at()` call was given: the hashed target dir name means `RootDirectory`
-    itself rejected the mkdir; a `.tmp-` name means the existing target dir
-    is unwritable (e.g. left by another UID); anything else is a component
-    of the `RootDirectory` path. `("-", "-")` for non-`OSError` failures."""
+    raw path. A failure opening an existing hashed target dir is tagged at
+    its source (`_open_or_create_subdir`) as `target_directory`. Otherwise
+    `stage` is derived from `exc.filename`, the dirent the failing `*at()`
+    call was given: the hashed target dir name means `RootDirectory` itself
+    rejected the mkdir; a `.tmp-` name means the existing target dir is
+    unwritable (e.g. left by another UID); anything else is a component of
+    the `RootDirectory` path. `("-", "-")` for non-`OSError` failures."""
     if not isinstance(exc, OSError) or exc.errno is None:
         return "-", "-"
     errno_name = errno.errorcode.get(exc.errno, str(exc.errno))
     name = exc.filename
-    if name == debug_artifact_dirname(canonical_server_address, config):
+    if getattr(exc, "debug_artifact_stage", None) == _TARGET_OPEN_STAGE:
+        stage = _TARGET_OPEN_STAGE
+    elif name == debug_artifact_dirname(canonical_server_address, config):
         stage = "root_directory"
     elif isinstance(name, str) and name.startswith(".tmp-"):
         stage = "target_directory"
@@ -181,7 +188,16 @@ class DebugArtifactStore:
             os.mkdir(name, dir_fd=parent_fd)
         except FileExistsError:
             pass
-        return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        try:
+            return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            # The mkdir above succeeded or found an existing dirent, so the
+            # parent accepted it — `name` itself is the obstruction (regular
+            # file or symlink -> ENOTDIR/ELOOP, another UID's 0700 dir ->
+            # EACCES). Same `filename` as a mkdir refused by the parent, so
+            # `describe_write_failure` cannot tell them apart without this.
+            exc.debug_artifact_stage = _TARGET_OPEN_STAGE
+            raise
 
     def _evict_oldest_for_target(self, target_dir: Path) -> None:
         candidates = [k for k in self._files if k.startswith(str(target_dir) + os.sep)]
