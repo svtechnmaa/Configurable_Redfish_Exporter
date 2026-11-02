@@ -126,6 +126,14 @@ You can use `curl` command to query server for testing data:
     curl -XGET 'http://<exporter-ip>:<exporter-port>/metrics?serverAddress=<server-ip>&config=<file name in config dir>'
     ```
 
+Query parameters of `/metrics`:
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `serverAddress` | yes | IP address of the iLO/iDRAC (BMC) |
+| `config` | yes | Config file name in the config dir, without `.yml` (e.g. `sample`) |
+| `loglevel` | no | One of `debug`, `info` (default), `warning`, `error`. Any other value is ignored and treated as `info`. See `Debug a scrape` below |
+
 Other way you can connect to FastAPI doc WebUI:
 * For example:
 
@@ -133,20 +141,54 @@ Other way you can connect to FastAPI doc WebUI:
     http://<exporter-ip>:<exporter-port>/docs
     ```
 
-#### Compare raw data with new data
-As you know data collected from vendors are different models, so we need convert them to models that defined in schema.
-For troubleshooting, you can go into exporter container with `/bin/sh` and check in `/tmp` directory:
-* For example:
+#### Debug a scrape
+Data collected from vendors uses different models, so the exporter converts it to the models defined in the schema.
+To inspect the converted (normalized) data for one target, enable debug artifacts and scrape with `loglevel=debug`.
+
+1. Enable debug artifacts in the `Tuning` block of **every** config file in the config dir (e.g. `sample.yml`, `sample2.yml`, ...). They are disabled by default.
+   `Tuning.Debug.*` keys are process-wide: one debug store serves all configs, so the exporter refuses to start if any of them differ between config files (`FATAL: profile validation failed at startup: Process-wide Tuning.Debug.WriteNormalizedData mismatch between profiles 'sample' and 'sample2'`). A key left out counts as its default, so a file without a `Debug` block conflicts with one that sets `WriteNormalizedData: true`.
+
+    ```yaml
+    Auth:
+      Username: CHANGE_ME_USERNAME
+      Password: CHANGE_ME_PASSWORD
+    Tuning:
+      Debug:
+        WriteNormalizedData: true        # must be a YAML boolean, not "true"
+        # RootDirectory: /tmp/redfish-data   # default, must be an absolute path
+        # MaxFileBytes: 5242880              # default 5 MiB per file
+        # MaxFilesPerTarget: 4
+        # MaxTotalBytes: 104857600           # default 100 MiB in total
+        # RetentionSeconds: 3600             # files older than this are purged
+    Metrics:
+      ...
+    ```
+
+    Restart the exporter after changing the config files.
+
+2. Scrape the target with `loglevel=debug`:
 
     ```bash
-    docker exec exporter /bin/sh -c 'ls /tmp/refish-data/RawData/'
-    
-    docker exec exporter /bin/sh -c 'ls /tmp/refish-data/NewData/'
+    curl -s 'http://<exporter-ip>:9814/metrics?serverAddress=<server-ip>&config=sample&loglevel=debug'
 
-    10.97.12.1.json    10.97.12.3.json    10.97.99.1.json
-    10.97.12.1.json    10.97.12.3.json    10.97.99.1.json
-
-    docker exec exporter /bin/sh -c 'cat /tmp/refish-data/RawData/10.97.99.1.json'
-
-    docker exec exporter /bin/sh -c 'cat /tmp/refish-data/NewData/10.97.99.1.json'
+    # or, letting curl encode the parameters:
+    curl -s -G 'http://<exporter-ip>:9814/metrics' \
+      --data-urlencode 'serverAddress=<server-ip>' \
+      --data-urlencode 'config=sample' \
+      --data-urlencode 'loglevel=debug'
     ```
+
+3. Read the artifact. It is written to `<RootDirectory>/<sha256 of "<server-ip>\0<config>">/NormalizedData.json`. The directory name is a hash, never the raw IP:
+
+    ```bash
+    docker exec exporter /bin/sh -c 'ls /tmp/redfish-data/*/NormalizedData.json'
+
+    # compute the directory name for one target/config pair
+    DIR=$(printf '%s\0%s' '<server-ip>' 'sample' | sha256sum | cut -d' ' -f1)
+    docker exec exporter /bin/sh -c "cat /tmp/redfish-data/$DIR/NormalizedData.json"
+    ```
+
+Notes:
+- `loglevel` applies only to that request. It does **not** change the exporter's log verbosity. Logging is configured once at startup from `redfish_collector/logging/logging.yml`. To see `DEBUG` log lines, change the level there and restart.
+- Without `WriteNormalizedData: true`, `loglevel=debug` writes nothing. Without `loglevel=debug`, scrapes write nothing even when debug artifacts are enabled.
+- A failure to write the debug artifact is logged and never fails the scrape.
