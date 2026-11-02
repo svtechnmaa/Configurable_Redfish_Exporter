@@ -12,9 +12,6 @@ concurrency:
   group: pr-build-${{ github.event.issue.number }}
   cancel-in-progress: true
 
-env:
-  IMAGE_NAME: 'redfish-exporter'
-
 jobs:
   gate:
     name: Validate /build request
@@ -34,6 +31,14 @@ jobs:
       head_sha: ${{ steps.pr.outputs.head_sha }}
       is_fork: ${{ steps.pr.outputs.is_fork }}
     steps:
+      # The falcon runner image is not guaranteed to ship `gh`/`jq` (Aegis
+      # avoids both there): fetch with curl, parse with setup-python's
+      # interpreter instead of grepping nested JSON.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Resolve PR head commit and fork status
         id: pr
         env:
@@ -42,9 +47,13 @@ jobs:
           PR_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
-          pr_json=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}")
-          head_sha=$(jq -r '.head.sha' <<<"$pr_json")
-          head_repo=$(jq -r '.head.repo.full_name // ""' <<<"$pr_json")
+          pr_json=$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}")
+          head_sha=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])' <<<"$pr_json")
+          head_repo=$(python3 -c 'import json,sys; print((json.load(sys.stdin)["head"].get("repo") or {}).get("full_name", ""))' <<<"$pr_json")
           echo "head_sha=${head_sha}" >> "$GITHUB_OUTPUT"
           if [ "$head_repo" = "$REPO" ]; then
             echo "is_fork=false" >> "$GITHUB_OUTPUT"
@@ -62,10 +71,22 @@ jobs:
     # "skip if `gate` was skipped/failed" check GitHub only applies when
     # no custom `if` is given.
     if: success() && needs.gate.outputs.is_fork == 'false'
-    runs-on: self-hosted
+    # Pinned to the docker-capable `falcon` runner, as Aegis does. Bare
+    # `self-hosted` lands on the juniper runner, which has no docker
+    # (`docker: command not found`, exit 127). The `falcon` label here is
+    # served by this repo's own in-cluster scale set (summerwind
+    # RunnerDeployment `redfish-exporter-runner`); Aegis's falcon-runner is
+    # scoped to the Aegis repo and never takes this repo's jobs.
+    runs-on: [self-hosted, falcon]
     permissions:
       contents: read
       packages: write
+    # Same build mechanism as Aegis's main.yml: classic builder
+    # (DOCKER_BUILDKIT=0) via the plain docker CLI, an isolated per-run
+    # credential store, login via --password-stdin, always log out.
+    env:
+      DOCKER_BUILDKIT: '0'
+      IMAGE_REF: ghcr.io/${{ github.repository_owner }}/redfish-exporter:pr-${{ github.event.issue.number }}
     steps:
       - name: Checkout PR head commit
         uses: actions/checkout@v4
@@ -73,46 +94,52 @@ jobs:
           ref: ${{ needs.gate.outputs.head_sha }}
           persist-credentials: false
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Read package version
         id: version
         run: |
+          set -euo pipefail
+          python3 -m pip install --quiet setuptools
           VERSION=$(python3 setup.py --version)
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      # Classic builder, not buildx/docker-container: this runner cannot
-      # run docker/setup-buildx-action + docker/build-push-action, so the
-      # build uses the plain `docker build`/`docker push` CLI instead,
-      # the same mechanism Aegis's main.yml uses (DOCKER_BUILDKIT=0).
+      - name: Isolate Docker credential store
+        shell: bash
+        run: echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-${{ github.run_id }}" >> "$GITHUB_ENV"
+
       - name: Build image
-        env:
-          DOCKER_BUILDKIT: '0'
+        shell: bash
         run: |
+          set -euo pipefail
           docker build \
-            -t "ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.issue.number }}" \
+            -t "${IMAGE_REF}" \
             --build-arg appVersion="${{ steps.version.outputs.version }}" \
             --build-arg maintainer=Freezing \
             .
 
-      - name: Build image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          load: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.issue.number }}
-          build-args: |
-            appVersion=${{ steps.version.outputs.version }}
-            maintainer=Freezing
-
-      # Login only happens after a successful build, and only this step
-      # and the next can push — build failure above stops the job here.
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: '${{ github.actor }}'
-          password: '${{ secrets.GITHUB_TOKEN }}'
+      # Login only happens after a successful build, and only the next
+      # step can push — a build failure above stops the job here.
+      - name: Log in to GHCR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${DOCKER_CONFIG}"
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${ACTOR}" --password-stdin
 
       - name: Push image
-        run: docker push "ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.issue.number }}"
+        shell: bash
+        run: docker push "${IMAGE_REF}"
+
+      - name: Log out of registries
+        if: always()
+        shell: bash
+        run: |
+          docker logout ghcr.io || true
+          rm -rf "${DOCKER_CONFIG}" || true
