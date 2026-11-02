@@ -55,7 +55,7 @@ setup(
         "pydantic==2.13.5",
         "uvicorn==0.52.4",
         "starlette==1.6.0",
-        "aiohttp==3.14.3",
+        "aiohttp==3.14.4",
         "python-dotenv==1.2.3"
     ],
     entry_points={
