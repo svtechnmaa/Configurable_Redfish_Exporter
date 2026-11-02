@@ -8,19 +8,22 @@ on:
       - main
 
 jobs:
-  # Security fix: a `pull_request` event (including from a fork) checks
-  # out PR-controlled content and then executes it — this very
-  # `scripts/test-env.sh` is part of that checkout, so a malicious fork PR
-  # could rewrite it to run arbitrary commands. That must never execute on
-  # the persistent, non-ephemeral `self-hosted` runner below, which keeps
-  # state/network access between jobs: untrusted code running there is a
-  # host compromise, not just a failed CI run. This job runs the identical
-  # test gate but only for `pull_request`, on a fresh, disposable
-  # GitHub-hosted runner with no secrets and no privileged host access,
-  # destroyed after the job finishes.
+  # All jobs run on the in-cluster `falcon` runner scale set (summerwind
+  # RunnerDeployment `redfish-exporter-runner`), like Aegis: GitHub-hosted
+  # runners are not available to this account, so an `ubuntu-latest` job
+  # never starts.
+  #
+  # Security: a `pull_request` event checks out PR-controlled content and
+  # executes it — this very `scripts/test-env.sh` is part of that checkout,
+  # so a fork PR could rewrite it to run arbitrary commands inside the
+  # cluster runner pod (cluster network access). With no disposable
+  # GitHub-hosted runner to send it to, fork PRs are skipped entirely; only
+  # PRs whose head branch lives in this repository run here.
   test_pr:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, falcon]
     permissions:
       contents: read
     steps:
@@ -35,13 +38,12 @@ jobs:
         scripts/test-env.sh setup
         scripts/test-env.sh verify
 
-  # Trusted path only: a genuine `push` to `main` (never `pull_request`,
-  # including a same-repo one) reaches the persistent `self-hosted`
-  # runner. Repository token permissions are not relied on to protect the
-  # runner host — the event-type gate below is what does that.
+  # Trusted path: a genuine `push` to `main`. Bare `self-hosted` used to
+  # land on the juniper host runner; pinning `falcon` keeps CI on the
+  # cluster scale set with the image build.
   test:
     if: github.event_name == 'push'
-    runs-on: self-hosted
+    runs-on: [self-hosted, falcon]
     permissions:
       contents: read
     steps:
