@@ -1,9 +1,8 @@
 from setuptools import setup, find_packages, find_namespace_packages
 
-# Single source of truth for the package version — both CI.yml and main.yml
-# read it dynamically via `python3 setup.py --version` rather than holding
-# their own copy, so `version=VERSION` below (not a second literal) is what
-# actually prevents this constant from drifting out of sync with itself.
+# Package version. main.yml (PR `/build` images) reads it via
+# `python3 setup.py --version`; release image tags are NOT taken from here —
+# release.yml numbers them `<VERSION_BASE>.N` from GHCR (see that workflow).
 VERSION = "2.3.0"
 PACKAGE_NAME = "redfish-exporter"
 
