@@ -5,6 +5,15 @@ name: Build and Push Release Image
 # one past the highest `<VERSION_BASE>.N` tag already on GHCR. Only a push to
 # `main` also promotes that image to `latest`; a manual rebuild publishes the
 # numbered tag only. PR images stay in main.yml (`/build` -> `pr-<number>`).
+#
+# Trusted ref: a manual dispatch runs the workflow file *from the chosen
+# ref*, so any in-file `if: github.ref == ...` check can be edited away on a
+# branch. The privileged `build` job therefore runs in the `release`
+# environment, whose deployment-branch rule (repo Settings -> Environments ->
+# release -> Deployment branches: Selected, `main` only) is enforced by
+# GitHub, not by this file. That environment MUST exist with that rule before
+# this workflow lands: referencing a missing environment auto-creates an
+# unrestricted one.
 on:
   push:
     branches: [main]
@@ -38,7 +47,12 @@ jobs:
   # in merge order.
   test:
     name: Test gate (setup, syntax, full pytest suite)
-    if: ${{ github.repository == 'svtechnmaa/Configurable_Redfish_Exporter' }}
+    # Fast-fail for dispatches from non-main refs. This check is advisory
+    # only (a branch can edit it); the enforcing control is the `release`
+    # environment on the build job.
+    if: >
+      github.repository == 'svtechnmaa/Configurable_Redfish_Exporter' &&
+      github.ref == 'refs/heads/main'
     runs-on: [self-hosted, falcon]
     permissions:
       contents: read
@@ -61,6 +75,11 @@ jobs:
     # No custom `if` here: the implicit success() means a failed or skipped
     # `test` job (including the repository guard above) stops the release.
     needs: test
+    # GitHub refuses to start this job unless the run's ref passes the
+    # `release` environment's deployment-branch rule (protected `main` only).
+    # That gate is outside this file, so a branch-edited copy of the workflow
+    # cannot reach the packages:write steps below from a non-main ref.
+    environment: release
     # Docker-capable in-cluster scale set; see CI.yml / main.yml.
     runs-on: [self-hosted, falcon]
     permissions:
@@ -69,9 +88,14 @@ jobs:
     env:
       DOCKER_BUILDKIT: '0'
     steps:
-      - name: Checkout
+      # Pin the checkout to the run's own commit. The environment gate above
+      # guarantees that commit is on `main`, so the version helper sourced
+      # below (.github/scripts/ghcr.sh) and the Dockerfile come only from the
+      # trusted ref, never from a branch.
+      - name: Checkout trusted main commit
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Isolate Docker credential store
