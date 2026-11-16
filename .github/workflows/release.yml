@@ -30,9 +30,37 @@ env:
   VERSION_BASE: '2.3'
 
 jobs:
+  # Test gate for the exact commit being released. This replaces CI.yml's
+  # former push-to-main `test` job: running it here (rather than in a
+  # separate workflow racing the build) is what makes a failing suite block
+  # both the numbered tag and the `latest` promotion. It sits inside the
+  # workflow-level concurrency queue on purpose, so releases still promote
+  # in merge order.
+  test:
+    name: Test gate (setup, syntax, full pytest suite)
+    if: ${{ github.repository == 'svtechnmaa/Configurable_Redfish_Exporter' }}
+    runs-on: [self-hosted, falcon]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run local test gate
+        run: |
+          scripts/test-env.sh setup
+          scripts/test-env.sh verify
+
   build:
     name: Build and push redfish-exporter
-    if: ${{ github.repository == 'svtechnmaa/Configurable_Redfish_Exporter' }}
+    # No custom `if` here: the implicit success() means a failed or skipped
+    # `test` job (including the repository guard above) stops the release.
+    needs: test
     # Docker-capable in-cluster scale set; see CI.yml / main.yml.
     runs-on: [self-hosted, falcon]
     permissions:
