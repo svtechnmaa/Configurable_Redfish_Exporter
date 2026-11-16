@@ -12,9 +12,16 @@ on:
 
 # Serialize version allocation across runs: two concurrent runs would read
 # the same max patch from GHCR and push the same numbered tag.
+#
+# `queue: max` keeps every waiting run (up to GitHub's 100-per-group limit),
+# in arrival order. Without it a group holds only ONE pending run and each
+# newer arrival cancels it — so a `workflow_dispatch` (numbered tag only)
+# could silently replace a waiting main-push run, and that merge would never
+# be promoted to `latest`. Requires cancel-in-progress to stay false.
 concurrency:
   group: release-main
   cancel-in-progress: false
+  queue: max
 
 env:
   REGISTRY: ghcr.io/svtechnmaa
