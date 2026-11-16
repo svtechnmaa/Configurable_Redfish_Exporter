@@ -115,8 +115,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The revision label is what release.yml checks before re-tagging
+          # this image as a release: it must equal the PR's merged head SHA.
           docker build \
             -t "${IMAGE_REF}" \
+            --label "org.opencontainers.image.revision=${{ needs.gate.outputs.head_sha }}" \
             --build-arg appVersion="${{ steps.version.outputs.version }}" \
             --build-arg maintainer=Freezing \
             .

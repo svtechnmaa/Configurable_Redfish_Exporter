@@ -1,14 +1,19 @@
-name: Build and Push Release Image
+name: Promote PR Image to Release
 
-# Release path, same scheme as Aegis's main.yml: every push to `main` (or a
-# manual dispatch) publishes `redfish-exporter:<VERSION_BASE>.<N>`, where N is
-# one past the highest `<VERSION_BASE>.N` tag already on GHCR. Only a push to
-# `main` also promotes that image to `latest`; a manual rebuild publishes the
-# numbered tag only. PR images stay in main.yml (`/build` -> `pr-<number>`).
+# Release path WITHOUT a rebuild: when a PR is merged into `main`, the image
+# that `/build` already produced for that PR (main.yml ->
+# `redfish-exporter:pr-<PR_NUMBER>`) is re-tagged as
+# `redfish-exporter:<VERSION_BASE>.<N>` and `latest`, where N is one past the
+# highest `<VERSION_BASE>.N` tag already on GHCR.
 #
-# Trusted ref: a manual dispatch runs the workflow file *from the chosen
-# ref*, so any in-file `if: github.ref == ...` check can be edited away on a
-# branch. The privileged `build` job therefore runs in the `release`
+# The promoted image must be exactly what was reviewed: main.yml stamps each
+# PR image with `org.opencontainers.image.revision=<PR head SHA>`, and this
+# workflow refuses to promote unless that label equals the merged PR's final
+# head SHA. A missing image, a missing label, or a stale image (commits pushed
+# after the last `/build`) fails the run — comment `/build` on the merged PR
+# again, then re-run this workflow. Nothing here ever falls back to building.
+#
+# Trusted ref: the privileged `promote` job runs in the `release`
 # environment, whose deployment-branch rule (repo Settings -> Environments ->
 # release -> Deployment branches: Selected, `main` only) is enforced by
 # GitHub, not by this file. That environment MUST exist with that rule before
@@ -17,16 +22,14 @@ name: Build and Push Release Image
 on:
   push:
     branches: [main]
-  workflow_dispatch:
 
 # Serialize version allocation across runs: two concurrent runs would read
 # the same max patch from GHCR and push the same numbered tag.
 #
 # `queue: max` keeps every waiting run (up to GitHub's 100-per-group limit),
-# in arrival order. Without it a group holds only ONE pending run and each
-# newer arrival cancels it — so a `workflow_dispatch` (numbered tag only)
-# could silently replace a waiting main-push run, and that merge would never
-# be promoted to `latest`. Requires cancel-in-progress to stay false.
+# in arrival order, so each merge is promoted to `latest` in merge order
+# instead of a newer arrival cancelling the one waiting ahead of it.
+# Requires cancel-in-progress to stay false.
 concurrency:
   group: release-main
   cancel-in-progress: false
@@ -39,17 +42,12 @@ env:
   VERSION_BASE: '2.3'
 
 jobs:
-  # Test gate for the exact commit being released. This replaces CI.yml's
-  # former push-to-main `test` job: running it here (rather than in a
-  # separate workflow racing the build) is what makes a failing suite block
-  # both the numbered tag and the `latest` promotion. It sits inside the
-  # workflow-level concurrency queue on purpose, so releases still promote
-  # in merge order.
+  # Test gate for the merged commit on `main`. No image is built here; this
+  # only stops a merge that breaks the suite from being promoted. It sits
+  # inside the workflow-level concurrency queue on purpose, so releases still
+  # promote in merge order.
   test:
     name: Test gate (setup, syntax, full pytest suite)
-    # Fast-fail for dispatches from non-main refs. This check is advisory
-    # only (a branch can edit it); the enforcing control is the `release`
-    # environment on the build job.
     if: >
       github.repository == 'svtechnmaa/Configurable_Redfish_Exporter' &&
       github.ref == 'refs/heads/main'
@@ -70,38 +68,99 @@ jobs:
           scripts/test-env.sh setup
           scripts/test-env.sh verify
 
-  build:
-    name: Build and push redfish-exporter
-    # No custom `if` here: the implicit success() means a failed or skipped
-    # `test` job (including the repository guard above) stops the release.
+  promote:
+    name: Re-tag PR image as release
+    # No custom `if`: the implicit success() means a failed or skipped
+    # `test` job stops the promotion.
     needs: test
     # GitHub refuses to start this job unless the run's ref passes the
     # `release` environment's deployment-branch rule (protected `main` only).
-    # That gate is outside this file, so a branch-edited copy of the workflow
-    # cannot reach the packages:write steps below from a non-main ref.
     environment: release
     # Docker-capable in-cluster scale set; see CI.yml / main.yml.
     runs-on: [self-hosted, falcon]
     permissions:
       contents: read
+      pull-requests: read
       packages: write
-    env:
-      DOCKER_BUILDKIT: '0'
     steps:
-      # Pin the checkout to the run's own commit. The environment gate above
-      # guarantees that commit is on `main`, so the version helper sourced
-      # below (.github/scripts/ghcr.sh) and the Dockerfile come only from the
-      # trusted ref, never from a branch.
+      # Only for the version helper (.github/scripts/ghcr.sh); the
+      # environment gate guarantees this commit is on `main`.
       - name: Checkout trusted main commit
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Find merged PR for this commit
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          pulls=$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPO}/commits/${SHA}/pulls")
+          # Exactly one PR merged into main whose merge commit is this push.
+          SHA="$SHA" python3 -c '
+          import json, os, sys
+          sha = os.environ["SHA"]
+          prs = [p for p in json.load(sys.stdin)
+                 if p.get("merged_at") and p["base"]["ref"] == "main"
+                 and p.get("merge_commit_sha") == sha]
+          if len(prs) != 1:
+              sys.exit(f"Expected exactly one PR merged into main as {sha}, found {len(prs)}; "
+                       "direct pushes to main are not promoted.")
+          number, head = prs[0]["number"], prs[0]["head"]["sha"]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"number={number}\nhead_sha={head}\n")
+          print(f"PR #{number}, head {head}")
+          ' <<<"$pulls"
+
       - name: Isolate Docker credential store
         shell: bash
         run: echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-${{ github.run_id }}" >> "$GITHUB_ENV"
 
+      - name: Log in to GHCR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${DOCKER_CONFIG}"
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${ACTOR}" --password-stdin
+
+      - name: Pull and verify PR image
+        shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          SRC="${REGISTRY}/${IMAGE}:pr-${PR_NUMBER}"
+          docker pull "$SRC" || {
+            echo "::error::${SRC} not found. Comment /build on PR #${PR_NUMBER}, then re-run this workflow."
+            exit 1
+          }
+          built=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$SRC")
+          if [ "$built" != "$HEAD_SHA" ]; then
+            echo "::error::${SRC} was built from '${built:-<no revision label>}', but PR #${PR_NUMBER} merged head ${HEAD_SHA}. Comment /build on PR #${PR_NUMBER} again, then re-run this workflow."
+            exit 1
+          fi
+          echo "Verified ${SRC} was built from ${HEAD_SHA}"
+
+      # Version is allocated only after the source image is verified, so a
+      # failed promotion never burns a patch number.
       - name: Compute next version
         id: ver
         shell: bash
@@ -114,49 +173,21 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Computed ${IMAGE} version=${version}"
 
-      - name: Build image
+      - name: Tag and push release + latest
         shell: bash
         env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          docker build --no-cache \
-            -t "${REGISTRY}/${IMAGE}:${VERSION}" \
-            --build-arg appVersion="${VERSION}" \
-            --build-arg maintainer=Freezing \
-            .
-
-      # Login only happens after a successful build.
-      - name: Log in to GHCR
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ACTOR: ${{ github.actor }}
-        run: |
-          set -euo pipefail
-          mkdir -p "${DOCKER_CONFIG}"
-          echo "${GH_TOKEN}" | docker login ghcr.io -u "${ACTOR}" --password-stdin
-
-      - name: Push image (and promote latest on push to main)
-        shell: bash
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
-          EVENT: ${{ github.event_name }}
-          REF: ${{ github.ref }}
-        run: |
-          set -euo pipefail
+          SRC="${REGISTRY}/${IMAGE}:pr-${PR_NUMBER}"
           IMG="${REGISTRY}/${IMAGE}:${VERSION}"
+          LATEST="${REGISTRY}/${IMAGE}:latest"
+          docker tag "$SRC" "$IMG"
+          docker tag "$SRC" "$LATEST"
           docker push "$IMG"
-          line="- \`${IMG}\`"
-          # Manual rebuilds publish numbered tags only.
-          if [ "${EVENT}" = "push" ] && [ "${REF}" = "refs/heads/main" ]; then
-            LATEST="${REGISTRY}/${IMAGE}:latest"
-            docker tag "$IMG" "$LATEST"
-            docker push "$LATEST"
-            echo "Promoted ${IMG} -> ${LATEST}"
-            line="${line} — also promoted to \`${LATEST}\`"
-          fi
-          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+          docker push "$LATEST"
+          echo "- \`${SRC}\` -> \`${IMG}\`, \`${LATEST}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Log out of registries
         if: always()
