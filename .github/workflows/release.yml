@@ -1,0 +1,166 @@
+name: Build and Push Release Image
+
+# Release path, same scheme as Aegis's main.yml: every push to `main` (or a
+# manual dispatch) publishes `redfish-exporter:<VERSION_BASE>.<N>`, where N is
+# one past the highest `<VERSION_BASE>.N` tag already on GHCR. Only a push to
+# `main` also promotes that image to `latest`; a manual rebuild publishes the
+# numbered tag only. PR images stay in main.yml (`/build` -> `pr-<number>`).
+#
+# Trusted ref: a manual dispatch runs the workflow file *from the chosen
+# ref*, so any in-file `if: github.ref == ...` check can be edited away on a
+# branch. The privileged `build` job therefore runs in the `release`
+# environment, whose deployment-branch rule (repo Settings -> Environments ->
+# release -> Deployment branches: Selected, `main` only) is enforced by
+# GitHub, not by this file. That environment MUST exist with that rule before
+# this workflow lands: referencing a missing environment auto-creates an
+# unrestricted one.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Serialize version allocation across runs: two concurrent runs would read
+# the same max patch from GHCR and push the same numbered tag.
+#
+# `queue: max` keeps every waiting run (up to GitHub's 100-per-group limit),
+# in arrival order. Without it a group holds only ONE pending run and each
+# newer arrival cancels it — so a `workflow_dispatch` (numbered tag only)
+# could silently replace a waiting main-push run, and that merge would never
+# be promoted to `latest`. Requires cancel-in-progress to stay false.
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+  queue: max
+
+env:
+  REGISTRY: ghcr.io/svtechnmaa
+  IMAGE: redfish-exporter
+  # Bump to start a new minor line (e.g. '2.4' -> first tag 2.4.0).
+  VERSION_BASE: '2.3'
+
+jobs:
+  # Test gate for the exact commit being released. This replaces CI.yml's
+  # former push-to-main `test` job: running it here (rather than in a
+  # separate workflow racing the build) is what makes a failing suite block
+  # both the numbered tag and the `latest` promotion. It sits inside the
+  # workflow-level concurrency queue on purpose, so releases still promote
+  # in merge order.
+  test:
+    name: Test gate (setup, syntax, full pytest suite)
+    # Fast-fail for dispatches from non-main refs. This check is advisory
+    # only (a branch can edit it); the enforcing control is the `release`
+    # environment on the build job.
+    if: >
+      github.repository == 'svtechnmaa/Configurable_Redfish_Exporter' &&
+      github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, falcon]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run local test gate
+        run: |
+          scripts/test-env.sh setup
+          scripts/test-env.sh verify
+
+  build:
+    name: Build and push redfish-exporter
+    # No custom `if` here: the implicit success() means a failed or skipped
+    # `test` job (including the repository guard above) stops the release.
+    needs: test
+    # GitHub refuses to start this job unless the run's ref passes the
+    # `release` environment's deployment-branch rule (protected `main` only).
+    # That gate is outside this file, so a branch-edited copy of the workflow
+    # cannot reach the packages:write steps below from a non-main ref.
+    environment: release
+    # Docker-capable in-cluster scale set; see CI.yml / main.yml.
+    runs-on: [self-hosted, falcon]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKER_BUILDKIT: '0'
+    steps:
+      # Pin the checkout to the run's own commit. The environment gate above
+      # guarantees that commit is on `main`, so the version helper sourced
+      # below (.github/scripts/ghcr.sh) and the Dockerfile come only from the
+      # trusted ref, never from a branch.
+      - name: Checkout trusted main commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Isolate Docker credential store
+        shell: bash
+        run: echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-${{ github.run_id }}" >> "$GITHUB_ENV"
+
+      - name: Compute next version
+        id: ver
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          source .github/scripts/ghcr.sh
+          version="$(next_version "$IMAGE")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Computed ${IMAGE} version=${version}"
+
+      - name: Build image
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker build --no-cache \
+            -t "${REGISTRY}/${IMAGE}:${VERSION}" \
+            --build-arg appVersion="${VERSION}" \
+            --build-arg maintainer=Freezing \
+            .
+
+      # Login only happens after a successful build.
+      - name: Log in to GHCR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${DOCKER_CONFIG}"
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${ACTOR}" --password-stdin
+
+      - name: Push image (and promote latest on push to main)
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          IMG="${REGISTRY}/${IMAGE}:${VERSION}"
+          docker push "$IMG"
+          line="- \`${IMG}\`"
+          # Manual rebuilds publish numbered tags only.
+          if [ "${EVENT}" = "push" ] && [ "${REF}" = "refs/heads/main" ]; then
+            LATEST="${REGISTRY}/${IMAGE}:latest"
+            docker tag "$IMG" "$LATEST"
+            docker push "$LATEST"
+            echo "Promoted ${IMG} -> ${LATEST}"
+            line="${line} — also promoted to \`${LATEST}\`"
+          fi
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log out of registries
+        if: always()
+        shell: bash
+        run: |
+          docker logout ghcr.io || true
+          rm -rf "${DOCKER_CONFIG}" || true

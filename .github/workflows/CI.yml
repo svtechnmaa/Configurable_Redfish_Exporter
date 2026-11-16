@@ -1,8 +1,5 @@
 name: CI
 on:
-  push:
-    branches:
-      - main
   pull_request:
     branches:
       - main
@@ -38,25 +35,6 @@ jobs:
         scripts/test-env.sh setup
         scripts/test-env.sh verify
 
-  # Trusted path: a genuine `push` to `main`. Bare `self-hosted` used to
-  # land on the juniper host runner; pinning `falcon` keeps CI on the
-  # cluster scale set with the image build.
-  test:
-    if: github.event_name == 'push'
-    runs-on: [self-hosted, falcon]
-    permissions:
-      contents: read
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-    - name: Run local test gate (setup, syntax, full pytest suite)
-      run: |
-        scripts/test-env.sh setup
-        scripts/test-env.sh verify
-
-  # Image build/publish now lives solely in main.yml (build job), so a
-  # push to main is never built and tagged twice.
+  # Push-to-main testing lives in release.yml (`test` job), where it gates
+  # the release image build and the `latest` promotion for the same commit.
+  # Keeping a second copy here would only race that build, not block it.
