@@ -284,7 +284,11 @@ async def _resolve_members(
         member_refs = member_refs[:max_members]
     records: list[ExecutedRecord] = []
     for member in member_refs:
-        if isinstance(member, dict) and _ODATA_ID in member:
+        # Only a pure link stub (annotations only, e.g. `@odata.id` plus any
+        # `@Redfish.*`) is fetched. Inline members that also carry their own
+        # `@odata.id` (iLO5/iDRAC `.../Thermal#/Fans/0`) are data: fetching
+        # that fragment link returns the whole parent instead.
+        if isinstance(member, dict) and _ODATA_ID in member and all(k.startswith("@") for k in member):
             member = member[_ODATA_ID]
         if isinstance(member, str):
             member_body = await fetch(member)

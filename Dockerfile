@@ -1,6 +1,11 @@
 # Compile redfish_exporter
 FROM python:3.12.7-alpine3.20 as build
 
+# Build args are stage-scoped: each stage must redeclare them after FROM,
+# or `${appVersion}`/`${maintainer}` below expand to empty strings.
+ARG appVersion
+ARG maintainer
+
 LABEL Name=builder
 LABEL appVersion=${appVersion}
 LABEL maintainer=${maintainer}
@@ -21,6 +26,9 @@ WORKDIR /opt/Configurable_Redfish_Exporter
 RUN python3 setup.py sdist --formats=gztar
 
 FROM python:3.12.7-alpine3.20
+
+ARG appVersion
+ARG maintainer
 
 LABEL Name=redfish_exporter
 LABEL appVersion=${appVersion}
