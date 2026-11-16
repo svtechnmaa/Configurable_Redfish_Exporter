@@ -1,0 +1,107 @@
+name: Build and Push Release Image
+
+# Release path, same scheme as Aegis's main.yml: every push to `main` (or a
+# manual dispatch) publishes `redfish-exporter:<VERSION_BASE>.<N>`, where N is
+# one past the highest `<VERSION_BASE>.N` tag already on GHCR. Only a push to
+# `main` also promotes that image to `latest`; a manual rebuild publishes the
+# numbered tag only. PR images stay in main.yml (`/build` -> `pr-<number>`).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Serialize version allocation across runs: two concurrent runs would read
+# the same max patch from GHCR and push the same numbered tag.
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io/svtechnmaa
+  IMAGE: redfish-exporter
+  # Bump to start a new minor line (e.g. '2.4' -> first tag 2.4.0).
+  VERSION_BASE: '2.3'
+
+jobs:
+  build:
+    name: Build and push redfish-exporter
+    if: ${{ github.repository == 'svtechnmaa/Configurable_Redfish_Exporter' }}
+    # Docker-capable in-cluster scale set; see CI.yml / main.yml.
+    runs-on: [self-hosted, falcon]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKER_BUILDKIT: '0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Isolate Docker credential store
+        shell: bash
+        run: echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-${{ github.run_id }}" >> "$GITHUB_ENV"
+
+      - name: Compute next version
+        id: ver
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          source .github/scripts/ghcr.sh
+          version="$(next_version "$IMAGE")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Computed ${IMAGE} version=${version}"
+
+      - name: Build image
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker build --no-cache \
+            -t "${REGISTRY}/${IMAGE}:${VERSION}" \
+            --build-arg appVersion="${VERSION}" \
+            --build-arg maintainer=Freezing \
+            .
+
+      # Login only happens after a successful build.
+      - name: Log in to GHCR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${DOCKER_CONFIG}"
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${ACTOR}" --password-stdin
+
+      - name: Push image (and promote latest on push to main)
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          IMG="${REGISTRY}/${IMAGE}:${VERSION}"
+          docker push "$IMG"
+          line="- \`${IMG}\`"
+          # Manual rebuilds publish numbered tags only.
+          if [ "${EVENT}" = "push" ] && [ "${REF}" = "refs/heads/main" ]; then
+            LATEST="${REGISTRY}/${IMAGE}:latest"
+            docker tag "$IMG" "$LATEST"
+            docker push "$LATEST"
+            echo "Promoted ${IMG} -> ${LATEST}"
+            line="${line} — also promoted to \`${LATEST}\`"
+          fi
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log out of registries
+        if: always()
+        shell: bash
+        run: |
+          docker logout ghcr.io || true
+          rm -rf "${DOCKER_CONFIG}" || true
